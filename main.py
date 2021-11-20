@@ -244,7 +244,7 @@ def validate(config, data_loader, model):
         target = target.cuda(non_blocking=True)
 
         # compute output
-        output = model(images)
+        output, attns = model(images)
 
         # measure accuracy and record loss
         loss = criterion(output, target)

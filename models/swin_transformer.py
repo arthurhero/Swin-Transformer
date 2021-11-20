@@ -136,12 +136,12 @@ class WindowAttention(nn.Module):
         else:
             attn = self.softmax(attn)
 
-        attn = self.attn_drop(attn)
+        attn = self.attn_drop(attn) # (bxnum_window) x num_head x n x n, first n are query points
 
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x
+        return x, attn
 
     def extra_repr(self) -> str:
         return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}'
@@ -250,7 +250,7 @@ class SwinTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
+        attn_windows, attn = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C, (bxnw) x num_head x n x n
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
@@ -267,7 +267,7 @@ class SwinTransformerBlock(nn.Module):
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
-        return x
+        return x, attn
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
@@ -386,14 +386,16 @@ class BasicLayer(nn.Module):
             self.downsample = None
 
     def forward(self, x):
+        attns = []
         for blk in self.blocks:
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x)
+                x, attn = checkpoint.checkpoint(blk, x)
             else:
-                x = blk(x)
+                x, attn = blk(x)
+            attns.append(attn)
         if self.downsample is not None:
             x = self.downsample(x)
-        return x
+        return x, attns
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
@@ -557,23 +559,25 @@ class SwinTransformer(nn.Module):
         return {'relative_position_bias_table'}
 
     def forward_features(self, x):
+        attns = []
         x = self.patch_embed(x)
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
 
         for layer in self.layers:
-            x = layer(x)
+            x, attn = layer(x)
+            attns.append(attn)
 
         x = self.norm(x)  # B L C
         x = self.avgpool(x.transpose(1, 2))  # B C 1
         x = torch.flatten(x, 1)
-        return x
+        return x, attns
 
     def forward(self, x):
-        x = self.forward_features(x)
+        x, attns = self.forward_features(x)
         x = self.head(x)
-        return x
+        return x, attns
 
     def flops(self):
         flops = 0
