@@ -592,9 +592,9 @@ class SwinTransformer(nn.Module):
         return x, attns, qks, masks, distances
 
     def forward(self, x):
-        x, attns = self.forward_features(x)
+        x, attns, qks, masks, distances = self.forward_features(x)
         x = self.head(x)
-        return x, attns
+        return x, attns, qks, masks, distances
 
     def flops(self):
         flops = 0
