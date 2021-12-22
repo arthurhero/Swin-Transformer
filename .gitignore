@@ -2,6 +2,7 @@ checkpoints/
 *.pth
 *.ckpt
 output/
+attns/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
