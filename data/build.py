@@ -82,13 +82,16 @@ def build_dataset(is_train, config):
             root = os.path.join(config.DATA.DATA_PATH, prefix)
             dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 1000
+    elif config.DATA.DATASET == 'cifar':
+        dataset = datasets.CIFAR10(config.DATA.DATA_PATH, train=is_train, transform=transform)
+        nb_classes = 10
     else:
         raise NotImplementedError("We only support ImageNet Now.")
 
     return dataset, nb_classes
 
 
-def build_transform(is_train, config):
+def build_transform_imagenet(is_train, config):
     resize_im = config.DATA.IMG_SIZE > 32
     if is_train:
         # this should always dispatch to transforms_imagenet_train
@@ -126,3 +129,36 @@ def build_transform(is_train, config):
     t.append(transforms.ToTensor())
     t.append(transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD))
     return transforms.Compose(t)
+
+def build_transform_cifar(is_train, config):
+    mean = np.asarray([0.4914, 0.4822, 0.4465])
+    std = np.asarray([0.2023, 0.1994, 0.2010])
+    img_size = config.DATA.IMG_SIZE
+    normalize = transforms.Normalize(
+        mean=mean,
+        std=std
+    )
+    if is_train:
+        trans_train = transforms.Compose([
+            transforms.RandomCrop(img_size, padding=4),
+            transforms.RandomHorizontalFlip(0.5),
+            transforms.ToTensor(),
+            normalize
+        ])
+        return trans_train
+    else:
+        test_img_size = 16
+        padding = (img_size - test_img_size) // 2
+        trans_test = transforms.Compose([
+            #transforms.Resize(test_img_size, interpolation=3),
+            #transforms.Pad(padding),
+            transforms.ToTensor(),
+            normalize
+        ])
+        return trans_test
+
+def build_transform(is_train, config):
+    if config.DATA.DATASET == 'imagenet':
+        return build_transform_imagenet(is_train, config)
+    else:
+        return build_transform_cifar(is_train, config)

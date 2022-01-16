@@ -82,4 +82,4 @@ def display_gather(query_idx=None):
 
 
 if __name__ == '__main__':
-    display_gather(48)
+    display_gather()
