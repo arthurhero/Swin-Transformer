@@ -244,7 +244,15 @@ def validate(config, data_loader, model):
         target = target.cuda(non_blocking=True)
 
         # compute output
-        output = model(images)
+        output, attns, qks, masks, distances = model(images)
+        if idx < 1:
+            torch.save(images, 'attns/images'+str(idx)+'.pt')
+            torch.save(attns, 'attns/attn'+str(idx)+'.pt')
+            torch.save(qks, 'attns/qks'+str(idx)+'.pt')
+            torch.save(masks, 'attns/masks'+str(idx)+'.pt')
+            torch.save(distances, 'attns/distances'+str(idx)+'.pt')
+        else:
+            return
 
         # measure accuracy and record loss
         loss = criterion(output, target)

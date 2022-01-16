@@ -95,6 +95,10 @@ class WindowAttention(nn.Module):
         coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
         coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
         relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
+
+        distance = ((relative_coords[0])**2+(relative_coords[1])**2) ** 0.5 # num_query x num_key
+        self.register_buffer("distance", distance)
+
         relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
         relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
         relative_coords[:, :, 1] += self.window_size[1] - 1
@@ -118,17 +122,18 @@ class WindowAttention(nn.Module):
         """
         B_, N, C = x.shape
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # (bxnum_window) x num_head x 49 x (c//num_head)
 
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))
+        qk_ret = attn # (bxnum_window) x num_head x num_query x num_key
 
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
             self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
         attn = attn + relative_position_bias.unsqueeze(0)
 
-        if mask is not None:
+        if mask is not None: # num_window x num_query x num_key
             nW = mask.shape[0]
             attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
             attn = attn.view(-1, self.num_heads, N, N)
@@ -136,12 +141,12 @@ class WindowAttention(nn.Module):
         else:
             attn = self.softmax(attn)
 
-        attn = self.attn_drop(attn)
+        attn = self.attn_drop(attn) # (bxnum_window) x num_head x n x n, first n are query points
 
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x
+        return x, attn, qk_ret, mask, self.distance
 
     def extra_repr(self) -> str:
         return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}'
@@ -250,7 +255,7 @@ class SwinTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
+        attn_windows, attn, qk_ret, mask, distance = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C, (bxnw) x num_head x n x n, (bxnw) x num_head x n x n, nw x n x n, n x n 
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
@@ -267,7 +272,7 @@ class SwinTransformerBlock(nn.Module):
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
-        return x
+        return x, attn, qk_ret, mask, distance
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
@@ -386,14 +391,22 @@ class BasicLayer(nn.Module):
             self.downsample = None
 
     def forward(self, x):
+        attns = []
+        qks = []
+        masks = []
+        distances = []
         for blk in self.blocks:
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x)
+                x, attn, qk_ret, mask, distance = checkpoint.checkpoint(blk, x)
             else:
-                x = blk(x)
+                x, attn, qk_ret, mask, distance = blk(x)
+            attns.append(attn)
+            qks.append(qk_ret)
+            masks.append(mask)
+            distances.append(distance)
         if self.downsample is not None:
             x = self.downsample(x)
-        return x
+        return x, attns, qks, masks, distances
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
@@ -557,23 +570,31 @@ class SwinTransformer(nn.Module):
         return {'relative_position_bias_table'}
 
     def forward_features(self, x):
+        attns = []
+        qks = []
+        masks = []
+        distances = []
         x = self.patch_embed(x)
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
 
         for layer in self.layers:
-            x = layer(x)
+            x, attn, qk, mask, dis = layer(x)
+            attns.append(attn)
+            qks.append(qk)
+            masks.append(mask)
+            distances.append(dis)
 
         x = self.norm(x)  # B L C
         x = self.avgpool(x.transpose(1, 2))  # B C 1
         x = torch.flatten(x, 1)
-        return x
+        return x, attns, qks, masks, distances
 
     def forward(self, x):
-        x = self.forward_features(x)
+        x, attns, qks, masks, distances = self.forward_features(x)
         x = self.head(x)
-        return x
+        return x, attns, qks, masks, distances
 
     def flops(self):
         flops = 0
