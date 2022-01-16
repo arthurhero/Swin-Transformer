@@ -1,1 +1,11 @@
-python -m torch.distributed.launch --nproc_per_node 1 --master_port 12345 main.py --eval --cfg configs/swin_tiny_patch4_window7_224.yaml --resume checkpoints/swin_tiny_patch4_window7_224.pth --data-path ../datasets/imagenet/ 
+NUM_PROC=1
+#CONFIG_FILE=configs/swin_tiny_patch4_window7_224.yaml
+CONFIG_FILE=configs/swin_tiny_patch2_window4_cifar.yaml
+#RESUME_FILE=checkpoints/swin_tiny_patch4_window7_224.pth
+RESUME_FILE=checkpoints/swin_tiny_patch2_window4_cifar.pth
+#DATA_PATH=../datasets/imagenet/
+DATA_PATH=../datasets/cifar10/
+
+CUDA_VISIBLE_DEVICES=0 WORLD_SIZE=$NUM_PROC python -m torch.distributed.launch --nproc_per_node $NUM_PROC --master_port 12345 \
+    main.py --cfg $CONFIG_FILE --resume $RESUME_FILE \
+    --data-path $DATA_PATH 
