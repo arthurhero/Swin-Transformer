@@ -560,7 +560,7 @@ class SwinTransformer(nn.Module):
                                drop=drop_rate, attn_drop=attn_drop_rate,
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
-                               downsample=PatchMerging if (i_layer < self.num_layers - 2) else None,
+                               downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 
@@ -601,10 +601,9 @@ class SwinTransformer(nn.Module):
 
         for i_layer in range(len(self.layers)):
             layer = self.layers[i_layer]
-            reso_i_layer = i_layer if i_layer < len(self.layers)-1 else i_layer-1
             x = layer(x,
-                    input_resolution=(patches_resolution[0] // (2 ** reso_i_layer),
-                        patches_resolution[1] // (2 ** reso_i_layer)))
+                    input_resolution=(patches_resolution[0] // (2 ** i_layer),
+                        patches_resolution[1] // (2 ** i_layer)))
 
         x = self.norm(x)  # B L C
         x = self.avgpool(x.transpose(1, 2))  # B C 1
