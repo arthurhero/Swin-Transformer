@@ -15,6 +15,7 @@ import random
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
+import torch.nn.functional as F
 
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from timm.utils import accuracy, AverageMeter
