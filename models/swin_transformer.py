@@ -140,7 +140,7 @@ class WindowAttention(nn.Module):
         old_window_size = self.window_size
         if old_window_size[0] != window_size[0]:
             relative_position_index = get_relative_pos_index(window_size, x.device)
-            relative_position_bias_table = self.relative_position_bias_table.view(2*window_size[0]-1,2*window_size[1]-1,-1)
+            relative_position_bias_table = self.relative_position_bias_table.view(2*old_window_size[0]-1,2*old_window_size[1]-1,-1)
             diff_wh = abs(old_window_size[0]-window_size[0])
             diff_ww = abs(old_window_size[1]-window_size[1])
             relative_position_bias_table = relative_position_bias_table[diff_wh:-diff_wh,diff_ww,-diff_ww]
@@ -560,7 +560,7 @@ class SwinTransformer(nn.Module):
                                drop=drop_rate, attn_drop=attn_drop_rate,
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
-                               downsample=PatchMerging if (i_layer < self.num_layers - 1) and i_layer < self.num_layers - 1 else None,
+                               downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 
