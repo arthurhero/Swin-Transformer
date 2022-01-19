@@ -61,6 +61,20 @@ def window_reverse(windows, window_size, H, W):
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
     return x
 
+def get_relative_pos_index(window_size):
+    # get pair-wise relative position index for each token inside the window
+    coords_h = torch.arange(window_size[0])
+    coords_w = torch.arange(window_size[1])
+    coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
+    coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
+    relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
+    relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
+    relative_coords[:, :, 0] += window_size[0] - 1  # shift to start from 0
+    relative_coords[:, :, 1] += window_size[1] - 1
+    relative_coords[:, :, 0] *= 2 * window_size[1] - 1
+    relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
+    return relative_position_index
+
 
 class WindowAttention(nn.Module):
     r""" Window based multi-head self attention (W-MSA) module with relative position bias.
@@ -110,7 +124,7 @@ class WindowAttention(nn.Module):
         trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, x, mask=None):
+    def forward(self, x, window_size, mask=None):
         """
         Args:
             x: input features with shape of (num_windows*B, N, C)
@@ -123,8 +137,20 @@ class WindowAttention(nn.Module):
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))
 
-        relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
-            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
+        old_window_size = self.window_size
+        if old_window_size[0] != window_size[0]:
+            relative_position_index = get_relative_pos_index(window_size)
+            relative_position_bias_table = self.relative_position_bias_table.view(2*window_size[0]-1,2*window_size[1]-1,-1)
+            diff_wh = abs(old_window_size[0]-window_size[0])
+            diff_ww = abs(old_window_size[1]-window_size[1])
+            relative_position_bias_table = relative_position_bias_table[diff_wh:-diff_wh,diff_ww,-diff_ww]
+            relative_position_bias_table = relative_position_bias_table.view(-1,self.num_heads)
+        else:
+            relative_position_index = self.relative_position_index
+            relative_position_bias_table = self.relative_position_bias_table
+
+        relative_position_bias = relative_position_bias_table[relative_position_index.view(-1)].view(
+            window_size[0] * window_size[1], window_size[0] * window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
         attn = attn + relative_position_bias.unsqueeze(0)
 
@@ -251,7 +277,7 @@ class SwinTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=attn_mask)  # nW*B, window_size*window_size, C
+        attn_windows = self.attn(x_windows, to_2tuple(self.window_size), mask=attn_mask)  # nW*B, window_size*window_size, C
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
