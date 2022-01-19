@@ -61,10 +61,10 @@ def window_reverse(windows, window_size, H, W):
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
     return x
 
-def get_relative_pos_index(window_size):
+def get_relative_pos_index(window_size, device):
     # get pair-wise relative position index for each token inside the window
-    coords_h = torch.arange(window_size[0])
-    coords_w = torch.arange(window_size[1])
+    coords_h = torch.arange(window_size[0], device=device)
+    coords_w = torch.arange(window_size[1], device=device)
     coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
     coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
     relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
@@ -139,7 +139,7 @@ class WindowAttention(nn.Module):
 
         old_window_size = self.window_size
         if old_window_size[0] != window_size[0]:
-            relative_position_index = get_relative_pos_index(window_size)
+            relative_position_index = get_relative_pos_index(window_size, x.device)
             relative_position_bias_table = self.relative_position_bias_table.view(2*window_size[0]-1,2*window_size[1]-1,-1)
             diff_wh = abs(old_window_size[0]-window_size[0])
             diff_ww = abs(old_window_size[1]-window_size[1])
