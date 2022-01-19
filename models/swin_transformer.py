@@ -143,7 +143,7 @@ class WindowAttention(nn.Module):
             relative_position_bias_table = self.relative_position_bias_table.view(2*old_window_size[0]-1,2*old_window_size[1]-1,-1)
             diff_wh = abs(old_window_size[0]-window_size[0])
             diff_ww = abs(old_window_size[1]-window_size[1])
-            relative_position_bias_table = relative_position_bias_table[diff_wh:-diff_wh,diff_ww,-diff_ww]
+            relative_position_bias_table = relative_position_bias_table[diff_wh:-diff_wh,diff_ww:-diff_ww]
             relative_position_bias_table = relative_position_bias_table.view(-1,self.num_heads)
         else:
             relative_position_index = self.relative_position_index
