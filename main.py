@@ -10,6 +10,7 @@ import time
 import argparse
 import datetime
 import numpy as np
+import random
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -156,11 +157,16 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     loss_meter = AverageMeter()
     norm_meter = AverageMeter()
 
+    img_sizes = [24,32,40]
     start = time.time()
     end = time.time()
     for idx, (samples, targets) in enumerate(data_loader):
         samples = samples.cuda(non_blocking=True)
         targets = targets.cuda(non_blocking=True)
+
+        img_size = img_sizes[np.random.randint(3)]
+        samples = F.interpolate(samples, size=img_size, mode = 'bicubic')
+
 
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
