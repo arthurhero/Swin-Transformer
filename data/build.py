@@ -147,9 +147,9 @@ def build_transform_cifar(is_train, config):
         ])
         return trans_train
     else:
-        test_img_size = 16
+        test_img_size = 32
         trans_test = transforms.Compose([
-            #transforms.Resize(test_img_size, interpolation=3),
+            transforms.Resize(test_img_size, interpolation=3),
             transforms.ToTensor(),
             normalize
         ])
