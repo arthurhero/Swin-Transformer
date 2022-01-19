@@ -467,7 +467,7 @@ class PatchEmbed(nn.Module):
         B, C, H, W = x.shape
 
         img_size = (H,W)
-        patch_size = to_2tuple(patch_size)
+        patch_size = to_2tuple(self.patch_size)
         patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]]
         self.img_size = img_size
         self.patches_resolution = patches_resolution
