@@ -19,7 +19,7 @@ from ffcv.fields import RGBImageField, IntField
 
 from ffcv.loader import Loader, OrderOption
 from ffcv.transforms import ToTensor, ToDevice, ToTorchImage, Cutout
-from ffcv.fields.decoders import IntDecoder, RandomResizedCropRGBImageDecoder, SimpleRGBImageDecoder
+from ffcv.fields.decoders import IntDecoder, RandomResizedCropRGBImageDecoder, SimpleRGBImageDecoder, CenterCropRGBImageDecoder
 
 import cv2
 
@@ -66,7 +66,12 @@ def convert_dataset(ds):
     test_writer.from_indexed_dataset(test_set)
 
 def peek_dataset(ds):
-    decoder = SimpleRGBImageDecoder()
+    if ds == 'cifar':
+        write_path = '../datasets/cifar10/cifar_test.beton'
+        decoder = SimpleRGBImageDecoder()
+    elif ds == 'imagenet':
+        write_path = '../datasets/imagenet/imagenet_test.beton'
+        decoder = CenterCropRGBImageDecoder((224,224),224/256)
     image_pipeline = [decoder, ToTensor(), ToTorchImage()]
     label_pipeline = [IntDecoder(), ToTensor()]
 
@@ -76,10 +81,6 @@ def peek_dataset(ds):
         'label': label_pipeline
     }
 
-    if ds == 'cifar':
-        write_path = '../datasets/cifar10/cifar_test.beton'
-    elif ds == 'imagenet':
-        write_path = '../datasets/imagenet/imagenet_test.beton'
     # Replaces PyTorch data loader (`torch.utils.data.Dataloader`)
     loader = Loader(write_path, batch_size=1, num_workers=1,
                     order=OrderOption.SEQUENTIAL, pipelines=pipelines)
@@ -93,4 +94,4 @@ def peek_dataset(ds):
 
 if __name__ == '__main__':
     #convert_dataset('imagenet')
-    peek_dataset('cifar')
+    peek_dataset('imagenet')
