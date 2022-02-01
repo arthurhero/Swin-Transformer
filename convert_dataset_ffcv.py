@@ -22,6 +22,7 @@ from ffcv.transforms import ToTensor, ToDevice, ToTorchImage, Cutout
 from ffcv.fields.decoders import IntDecoder, RandomResizedCropRGBImageDecoder, SimpleRGBImageDecoder, CenterCropRGBImageDecoder
 from ffcv.pipeline.operation import Operation
 from ffcv.pipeline.allocation_query import AllocationQuery
+from ffcv.pipeline.compiler import Compiler
 from dataclasses import replace
 from PIL import Image
 
@@ -30,7 +31,8 @@ import cv2
 class ImagenetTransform(Operation):
 
     # Return the code to run this operation
-    def generate_code(self) -> Callable:
+    def generate_code(self):
+        parallel_range = Compiler.get_iterator()
         def imagenet_trans(images, dst):
             '''
             images - b x h x w x c
@@ -48,6 +50,7 @@ class ImagenetTransform(Operation):
                 interpolation='bicubic',
             )
             transform.transforms[0] = transforms.ToPILImage()
+            del transform.transforms[-2] # no normalization
             for i in parallel_range(images.shape[0]):
                 img_trans = transform(images[i])
                 dst[i] = img_trans
@@ -55,20 +58,22 @@ class ImagenetTransform(Operation):
         imagenet_trans.is_parallel = True
         return imagenet_trans
 
-    def declare_state_and_memory(self, previous_state: State) -> Tuple[State, Optional[AllocationQuery]]:
+    def declare_state_and_memory(self, previous_state):
         h, w, c = previous_state.shape
         new_shape = (c, 224, 224)
+        #new_dtype = torch.from_numpy(np.empty((), dtype=previous_state.dtype)).dtype
+        new_dtype = torch.float32 
  
         # Everything in the state stays the same other than the shape
         # States are immutable, so we have to edit them using the
         # dataclasses.replace function
-        new_state = replace(previous_state, shape=new_shape, dtype=torch.float16)
+        new_state = replace(previous_state, shape=new_shape, dtype=new_dtype, jit_mode=False)
  
         # We need to allocate memory for the new images
         # so below, we ask for a memory allocation whose width and height is
         # half the original image, with the same type
         # (shape=(,)) of the same type as the image data
-        mem_allocation = AllocationQuery(new_shape, torch.float16)
+        mem_allocation = AllocationQuery(new_shape, new_dtype)
         return (new_state, mem_allocation)
 
 def display_img(img):
@@ -122,6 +127,7 @@ def peek_dataset(ds):
         write_path = '../datasets/imagenet/imagenet_test.beton'
         decoder = CenterCropRGBImageDecoder((224,224),224/256)
         image_pipeline = [decoder, ImagenetTransform()]
+        #image_pipeline = [decoder, ToTensor(), ToTorchImage()]
     label_pipeline = [IntDecoder(), ToTensor()]
 
     # Pipeline for each data field
@@ -136,6 +142,8 @@ def peek_dataset(ds):
     for i,(imgs, labels) in enumerate(loader):
         print('labels', labels)
         print('imgs', imgs)
+        print('min max',imgs.min(),imgs.max())
+        print(imgs.shape)
         img = cv2.cvtColor(imgs[0].permute(1,2,0).cpu().numpy(), cv2.COLOR_BGR2RGB)
         display_img(img)
 
