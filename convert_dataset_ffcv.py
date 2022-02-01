@@ -20,8 +20,56 @@ from ffcv.fields import RGBImageField, IntField
 from ffcv.loader import Loader, OrderOption
 from ffcv.transforms import ToTensor, ToDevice, ToTorchImage, Cutout
 from ffcv.fields.decoders import IntDecoder, RandomResizedCropRGBImageDecoder, SimpleRGBImageDecoder, CenterCropRGBImageDecoder
+from ffcv.pipeline.operation import Operation
+from ffcv.pipeline.allocation_query import AllocationQuery
+from dataclasses import replace
+from PIL import Image
 
 import cv2
+
+class ImagenetTransform(Operation):
+
+    # Return the code to run this operation
+    def generate_code(self) -> Callable:
+        def imagenet_trans(images, dst):
+            '''
+            images - b x h x w x c
+            dst - b x 224 x 224 x c
+            '''
+            from timm.data import create_transform
+            transform = create_transform(
+                input_size=224,
+                is_training=True,
+                color_jitter=0.4,
+                auto_augment='rand-m9-mstd0.5-inc1',
+                re_prob=0.25,
+                re_mode='pixel',
+                re_count=1,
+                interpolation='bicubic',
+            )
+            transform.transforms[0] = transforms.ToPILImage()
+            for i in parallel_range(images.shape[0]):
+                img_trans = transform(images[i])
+                dst[i] = img_trans
+            return dst
+        imagenet_trans.is_parallel = True
+        return imagenet_trans
+
+    def declare_state_and_memory(self, previous_state: State) -> Tuple[State, Optional[AllocationQuery]]:
+        h, w, c = previous_state.shape
+        new_shape = (c, 224, 224)
+ 
+        # Everything in the state stays the same other than the shape
+        # States are immutable, so we have to edit them using the
+        # dataclasses.replace function
+        new_state = replace(previous_state, shape=new_shape, dtype=torch.float16)
+ 
+        # We need to allocate memory for the new images
+        # so below, we ask for a memory allocation whose width and height is
+        # half the original image, with the same type
+        # (shape=(,)) of the same type as the image data
+        mem_allocation = AllocationQuery(new_shape, torch.float16)
+        return (new_state, mem_allocation)
 
 def display_img(img):
     cv2.imshow('img',img)
@@ -69,10 +117,11 @@ def peek_dataset(ds):
     if ds == 'cifar':
         write_path = '../datasets/cifar10/cifar_test.beton'
         decoder = SimpleRGBImageDecoder()
+        image_pipeline = [decoder, ToTensor(), ToTorchImage()]
     elif ds == 'imagenet':
         write_path = '../datasets/imagenet/imagenet_test.beton'
         decoder = CenterCropRGBImageDecoder((224,224),224/256)
-    image_pipeline = [decoder, ToTensor(), ToTorchImage()]
+        image_pipeline = [decoder, ImagenetTransform()]
     label_pipeline = [IntDecoder(), ToTensor()]
 
     # Pipeline for each data field
