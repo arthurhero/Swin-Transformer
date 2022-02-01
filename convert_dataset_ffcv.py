@@ -152,5 +152,5 @@ def peek_dataset(ds):
 
 
 if __name__ == '__main__':
-    #convert_dataset('imagenet')
-    peek_dataset('imagenet')
+    convert_dataset('cifar')
+    #peek_dataset('imagenet')

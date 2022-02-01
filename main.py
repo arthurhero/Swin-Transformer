@@ -132,7 +132,8 @@ def main(config):
     logger.info("Start training")
     start_time = time.time()
     for epoch in range(config.TRAIN.START_EPOCH, config.TRAIN.EPOCHS):
-        data_loader_train.sampler.set_epoch(epoch)
+        #data_loader_train.sampler.set_epoch(epoch)
+        data_loader_train.next_epoch = epoch
 
         train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler)
         if dist.get_rank() == 0 and (epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)):
@@ -157,16 +158,16 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     loss_meter = AverageMeter()
     norm_meter = AverageMeter()
 
-    img_sizes = [24,32,40]
+    #img_sizes = [24,32,40]
     start = time.time()
     end = time.time()
     for idx, (samples, targets) in enumerate(data_loader):
         samples = samples.cuda(non_blocking=True)
         targets = targets.cuda(non_blocking=True)
-
+        '''
         img_size = img_sizes[np.random.randint(3)]
         samples = F.interpolate(samples, size=img_size, mode = 'bicubic')
-
+        '''
 
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)

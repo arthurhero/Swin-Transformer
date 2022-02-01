@@ -13,7 +13,6 @@ from torchvision import datasets, transforms
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.data import Mixup
 from timm.data import create_transform
-from timm.data.transforms import _pil_interp
 
 from torch.utils.data import Dataset, DataLoader
 
@@ -33,6 +32,8 @@ import cv2
 
 from .cached_image_folder import CachedImageFolder
 from .samplers import SubsetRandomSampler
+
+config = None
 
 class ImagenetTransform(Operation):
     def generate_code(self):
@@ -199,7 +200,9 @@ def build_cifar_loader(config):
     return 10000, data_loader_train, data_loader_val, mixup_fn
 
 
-def build_loader(config):
+def build_loader(config_):
+    global config
+    config = config_
     if config.DATA.DATASET == 'imagenet':
         return build_imagenet_loader(config)
     else:
