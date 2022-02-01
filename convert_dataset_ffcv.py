@@ -61,7 +61,6 @@ class ImagenetTransform(Operation):
     def declare_state_and_memory(self, previous_state):
         h, w, c = previous_state.shape
         new_shape = (c, 224, 224)
-        #new_dtype = torch.from_numpy(np.empty((), dtype=previous_state.dtype)).dtype
         new_dtype = torch.float32 
  
         # Everything in the state stays the same other than the shape
@@ -125,9 +124,12 @@ def peek_dataset(ds):
         image_pipeline = [decoder, ToTensor(), ToTorchImage()]
     elif ds == 'imagenet':
         write_path = '../datasets/imagenet/imagenet_test.beton'
-        decoder = CenterCropRGBImageDecoder((224,224),224/256)
+        decoder = RandomResizedCropRGBImageDecoder((224,224))
         image_pipeline = [decoder, ImagenetTransform()]
-        #image_pipeline = [decoder, ToTensor(), ToTorchImage()]
+        '''
+        decoder = CenterCropRGBImageDecoder((224,224),224/256)
+        image_pipeline = [decoder, ToTensor(), ToTorchImage()]
+        '''
     label_pipeline = [IntDecoder(), ToTensor()]
 
     # Pipeline for each data field
