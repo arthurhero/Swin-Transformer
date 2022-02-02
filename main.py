@@ -121,9 +121,7 @@ def main(config):
 
     if config.MODEL.RESUME:
         max_accuracy = load_checkpoint(config, model_without_ddp, optimizer, lr_scheduler, logger)
-        print("before val")
         acc1, acc5, loss = validate(config, data_loader_val, model)
-        print("after val")
         logger.info(f"Accuracy of the network on the {dataset_val_len} test images: {acc1:.1f}%")
         if config.EVAL_MODE:
             return
@@ -251,14 +249,11 @@ def validate(config, data_loader, model):
     acc5_meter = AverageMeter()
 
     end = time.time()
-    print("before dl")
     for idx, (images, target) in enumerate(data_loader):
-        print("in dl")
         '''
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
         '''
-        print("to cuda")
 
         # compute output
         output = model(images)

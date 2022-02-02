@@ -7,6 +7,7 @@
 
 from .swin_transformer import SwinTransformer
 from .swin_mlp import SwinMLP
+from torchvision import models
 
 
 def build_model(config):
@@ -43,6 +44,12 @@ def build_model(config):
                         ape=config.MODEL.SWIN_MLP.APE,
                         patch_norm=config.MODEL.SWIN_MLP.PATCH_NORM,
                         use_checkpoint=config.TRAIN.USE_CHECKPOINT)
+    elif model_type == 'resnet50_cifar':
+        model = models.resnet50()
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Linear(num_ftrs, config.MODEL.NUM_CLASSES)
+        if config.DATA.DATASET == 'cifar':
+            model.conv1 = nn.Conv2d(3,64,kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
     else:
         raise NotImplementedError(f"Unkown model: {model_type}")
 
