@@ -1,0 +1,10 @@
+MODEL:
+  TYPE: resnet50_cifar
+  NAME: resnet50_cifar_multi
+  DROP_PATH_RATE: 0.2
+DATA:
+  DATASET: cifar
+  IMG_SIZE: 32
+  BATCH_SIZE: 256
+TRAIN:
+  EPOCHS: 1000
