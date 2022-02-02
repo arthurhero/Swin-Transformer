@@ -57,7 +57,7 @@ class ImagenetTransform(Operation):
             transform.transforms[0] = transforms.ToPILImage()
             for i in parallel_range(images.shape[0]):
                 img_trans = transform(images[i])
-                img_trans = img_trans.view(dtype=torch.float16)
+                img_trans = img_trans.to(torch.float16)
                 dst[i] = img_trans
             dst = dst.to(memory_format=torch.channels_last)
             return dst
@@ -142,7 +142,7 @@ class CifarTransform(Operation):
             ])
             for i in parallel_range(images.shape[0]):
                 img_trans = transform(images[i])
-                img_trans = img_trans.view(dtype=torch.float16)
+                img_trans = img_trans.to(torch.float16)
                 dst[i] = img_trans
             dst = dst.to(memory_format=torch.channels_last)
             return dst
