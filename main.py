@@ -79,6 +79,7 @@ def main(config):
 
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
     model = build_model(config)
+    model.to(memory_format=torch.channels_last)
     model.cuda()
     logger.info(str(model))
 
@@ -120,7 +121,9 @@ def main(config):
 
     if config.MODEL.RESUME:
         max_accuracy = load_checkpoint(config, model_without_ddp, optimizer, lr_scheduler, logger)
+        print("before val")
         acc1, acc5, loss = validate(config, data_loader_val, model)
+        print("after val")
         logger.info(f"Accuracy of the network on the {dataset_val_len} test images: {acc1:.1f}%")
         if config.EVAL_MODE:
             return
@@ -133,7 +136,7 @@ def main(config):
     start_time = time.time()
     for epoch in range(config.TRAIN.START_EPOCH, config.TRAIN.EPOCHS):
         #data_loader_train.sampler.set_epoch(epoch)
-        data_loader_train.next_epoch = epoch
+        #data_loader_train.next_epoch = epoch
 
         train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler)
         if dist.get_rank() == 0 and (epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)):
@@ -162,8 +165,10 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     start = time.time()
     end = time.time()
     for idx, (samples, targets) in enumerate(data_loader):
+        '''
         samples = samples.cuda(non_blocking=True)
         targets = targets.cuda(non_blocking=True)
+        '''
         '''
         img_size = img_sizes[np.random.randint(3)]
         samples = F.interpolate(samples, size=img_size, mode = 'bicubic')
@@ -246,9 +251,14 @@ def validate(config, data_loader, model):
     acc5_meter = AverageMeter()
 
     end = time.time()
+    print("before dl")
     for idx, (images, target) in enumerate(data_loader):
+        print("in dl")
+        '''
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
+        '''
+        print("to cuda")
 
         # compute output
         output = model(images)
@@ -287,7 +297,7 @@ def throughput(data_loader, model, logger):
     model.eval()
 
     for idx, (images, _) in enumerate(data_loader):
-        images = images.cuda(non_blocking=True)
+        #images = images.cuda(non_blocking=True)
         batch_size = images.shape[0]
         for i in range(50):
             model(images)

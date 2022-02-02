@@ -57,7 +57,9 @@ class ImagenetTransform(Operation):
             transform.transforms[0] = transforms.ToPILImage()
             for i in parallel_range(images.shape[0]):
                 img_trans = transform(images[i])
+                img_trans = img_trans.view(dtype=torch.float16)
                 dst[i] = img_trans
+            dst = dst.to(memory_format=torch.channels_last)
             return dst
         imagenet_trans.is_parallel = True
         return imagenet_trans
@@ -65,7 +67,7 @@ class ImagenetTransform(Operation):
     def declare_state_and_memory(self, previous_state):
         h, w, c = previous_state.shape
         new_shape = (c, config.DATA.IMG_SIZE, config.DATA.IMG_SIZE)
-        new_dtype = torch.float32
+        new_dtype = torch.float16
 
         new_state = replace(previous_state, shape=new_shape, dtype=new_dtype, jit_mode=False)
         mem_allocation = AllocationQuery(new_shape, new_dtype)
@@ -79,10 +81,10 @@ def build_imagenet_loader(config):
     num_tasks = dist.get_world_size()
     global_rank = dist.get_rank()
 
-    label_pipeline = [IntDecoder(), ToTensor(), Squeeze()]
+    label_pipeline = [IntDecoder(), ToTensor(), Squeeze(), ToDevice(torch.device(f'cuda:{config.LOCAL_RANK}'), non_blocking=True)]
 
     train_decoder = RandomResizedCropRGBImageDecoder((config.DATA.IMG_SIZE, config.DATA.IMG_SIZE))
-    train_pipeline = [train_decoder, ImagenetTransform()]
+    train_pipeline = [train_decoder, ImagenetTransform(), ToDevice(torch.device(f'cuda:{config.LOCAL_RANK}'), non_blocking=True)]
     train_pipelines = {
         'image': train_pipeline,
         'label': label_pipeline
@@ -95,7 +97,7 @@ def build_imagenet_loader(config):
     val_decoder = CenterCropRGBImageDecoder((config.DATA.IMG_SIZE,config.DATA.IMG_SIZE),224/256)
     IMAGENET_MEAN = np.array([0.485, 0.456, 0.406]) * 255
     IMAGENET_STD = np.array([0.229, 0.224, 0.225]) * 255
-    val_pipeline = [val_decoder, ToTensor(), ToTorchImage(), NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float32)]
+    val_pipeline = [val_decoder, ToTensor(), ToDevice(torch.device(f'cuda:{config.LOCAL_RANK}'), non_blocking=True), ToTorchImage(), NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16)]
     val_pipelines = {
         'image': val_pipeline,
         'label': label_pipeline
@@ -140,7 +142,9 @@ class CifarTransform(Operation):
             ])
             for i in parallel_range(images.shape[0]):
                 img_trans = transform(images[i])
+                img_trans = img_trans.view(dtype=torch.float16)
                 dst[i] = img_trans
+            dst = dst.to(memory_format=torch.channels_last)
             return dst
         cifar_trans.is_parallel = True
         return cifar_trans 
@@ -148,7 +152,7 @@ class CifarTransform(Operation):
     def declare_state_and_memory(self, previous_state):
         h, w, c = previous_state.shape
         new_shape = (c, config.DATA.IMG_SIZE, config.DATA.IMG_SIZE)
-        new_dtype = torch.float32
+        new_dtype = torch.float16
 
         new_state = replace(previous_state, shape=new_shape, dtype=new_dtype, jit_mode=False)
         mem_allocation = AllocationQuery(new_shape, new_dtype)
@@ -162,10 +166,10 @@ def build_cifar_loader(config):
     num_tasks = dist.get_world_size()
     global_rank = dist.get_rank()
 
-    label_pipeline = [IntDecoder(), ToTensor(), Squeeze()]
+    label_pipeline = [IntDecoder(), ToTensor(), Squeeze(), ToDevice(torch.device(f'cuda:{config.LOCAL_RANK}'), non_blocking=True)]
 
     train_decoder = SimpleRGBImageDecoder() 
-    train_pipeline = [train_decoder, CifarTransform()]
+    train_pipeline = [train_decoder, CifarTransform(), ToDevice(torch.device(f'cuda:{config.LOCAL_RANK}'), non_blocking=True)]
     train_pipelines = {
         'image': train_pipeline,
         'label': label_pipeline
@@ -178,7 +182,7 @@ def build_cifar_loader(config):
     val_decoder = SimpleRGBImageDecoder() 
     mean = np.asarray([0.4914, 0.4822, 0.4465]) * 255
     std = np.asarray([0.2023, 0.1994, 0.2010]) * 255
-    val_pipeline = [val_decoder, ToTensor(), ToTorchImage(), NormalizeImage(mean, std, np.float32)]
+    val_pipeline = [val_decoder, ToTensor(), ToDevice(torch.device(f'cuda:{config.LOCAL_RANK}'), non_blocking=True), ToTorchImage(), NormalizeImage(mean, std, np.float16)]
     val_pipelines = {
         'image': val_pipeline,
         'label': label_pipeline
