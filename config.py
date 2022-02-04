@@ -80,6 +80,13 @@ _C.MODEL.SWIN_MLP.MLP_RATIO = 4.
 _C.MODEL.SWIN_MLP.APE = False
 _C.MODEL.SWIN_MLP.PATCH_NORM = True
 
+# cluster parameters
+_C.MODEL.CLUSTER = CN()
+_C.MODEL.CLUSTER.POS_DIM = 2
+_C.MODEL.CLUSTER.K = [64,16,4,1]
+_C.MODEL.CLUSTER.POS_LAMBDA = [0.0003,0.0001,0.00003,0]
+_C.MODEL.CLUSTER.POS_MLP_BIAS = True
+
 # -----------------------------------------------------------------------------
 # Training settings
 # -----------------------------------------------------------------------------

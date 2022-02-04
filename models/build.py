@@ -7,6 +7,7 @@
 
 from .swin_transformer import SwinTransformer
 from .swin_conv import SwinTransformerConv
+from .cluster_transformer import ClusterTransformer
 from .swin_mlp import SwinMLP
 from torchvision import models
 
@@ -14,8 +15,7 @@ from torchvision import models
 def build_model(config):
     model_type = config.MODEL.TYPE
     if model_type == 'swin':
-        model = SwinTransformer(img_size=config.DATA.IMG_SIZE,
-                                patch_size=config.MODEL.SWIN.PATCH_SIZE,
+        model = SwinTransformer(patch_size=config.MODEL.SWIN.PATCH_SIZE,
                                 in_chans=config.MODEL.SWIN.IN_CHANS,
                                 num_classes=config.MODEL.NUM_CLASSES,
                                 embed_dim=config.MODEL.SWIN.EMBED_DIM,
@@ -46,8 +46,7 @@ def build_model(config):
                         patch_norm=config.MODEL.SWIN_MLP.PATCH_NORM,
                         use_checkpoint=config.TRAIN.USE_CHECKPOINT)
     elif model_type == 'swin_conv':
-        model = SwinTransformerConv(img_size=config.DATA.IMG_SIZE,
-                                patch_size=config.MODEL.SWIN.PATCH_SIZE,
+        model = SwinTransformerConv(patch_size=config.MODEL.SWIN.PATCH_SIZE,
                                 in_chans=config.MODEL.SWIN.IN_CHANS,
                                 num_classes=config.MODEL.NUM_CLASSES,
                                 embed_dim=config.MODEL.SWIN.EMBED_DIM,
@@ -60,6 +59,25 @@ def build_model(config):
                                 drop_rate=config.MODEL.DROP_RATE,
                                 drop_path_rate=config.MODEL.DROP_PATH_RATE,
                                 ape=config.MODEL.SWIN.APE,
+                                patch_norm=config.MODEL.SWIN.PATCH_NORM,
+                                use_checkpoint=config.TRAIN.USE_CHECKPOINT)
+    elif model_type == 'cluster':
+        model = ClusterTransformerConv(patch_size=config.MODEL.SWIN.PATCH_SIZE,
+                                in_chans=config.MODEL.SWIN.IN_CHANS,
+                                num_classes=config.MODEL.NUM_CLASSES,
+                                embed_dim=config.MODEL.SWIN.EMBED_DIM,
+                                pos_dim=config.MODEL.CLUSTER.POS_DIM,
+                                k=config.MODEL.CLUSTER.K,
+                                pos_lambda=config.MODEL.CLUSTER.POS_LAMBDA,
+                                depths=config.MODEL.SWIN.DEPTHS,
+                                num_heads=config.MODEL.SWIN.NUM_HEADS,
+                                window_size=config.MODEL.SWIN.WINDOW_SIZE,
+                                mlp_ratio=config.MODEL.SWIN.MLP_RATIO,
+                                qkv_bias=config.MODEL.SWIN.QKV_BIAS,
+                                pos_mlp_bias=config.MODEL.CLUSTER.POS_MLP_BIAS,
+                                qk_scale=config.MODEL.SWIN.QK_SCALE,
+                                drop_rate=config.MODEL.DROP_RATE,
+                                drop_path_rate=config.MODEL.DROP_PATH_RATE,
                                 patch_norm=config.MODEL.SWIN.PATCH_NORM,
                                 use_checkpoint=config.TRAIN.USE_CHECKPOINT)
     elif model_type == 'resnet50_cifar':
