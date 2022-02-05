@@ -218,14 +218,14 @@ class SwinTransformerBlock(nn.Module):
 
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention(
-            self.dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
+            self.dim, window_size=to_2tuple(self.window_size), num_heads=num_heads-1,
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-        self.conv = nn.Conv2d(dim,dim,kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=True)
+        self.conv = nn.Conv2d(self.conv_dim,self.conv_dim,kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=True)
 
     def forward(self, x, input_resolution):
 
@@ -269,7 +269,7 @@ class SwinTransformerBlock(nn.Module):
         x = x.view(B, H, W, C)
 
         x_conv = x[:,:,:,:self.conv_dim]
-        x_conv = self.conv(x_conv.permute(0,3,1,2)).permute(0,2,3,1).reshape(B,-1,C) # b x (h*w) x c
+        x_conv = self.conv(x_conv.permute(0,3,1,2)).permute(0,2,3,1).reshape(B,-1,self.conv_dim) # b x (h*w) x c
         x = x[:,:,:,self.conv_dim:]
 
         # cyclic shift
@@ -280,13 +280,13 @@ class SwinTransformerBlock(nn.Module):
 
         # partition windows
         x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
-        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, self.dim)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
         attn_windows = self.attn(x_windows, to_2tuple(self.window_size), mask=attn_mask)  # nW*B, window_size*window_size, C
 
         # merge windows
-        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, self.dim)
         shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
 
         # reverse cyclic shift

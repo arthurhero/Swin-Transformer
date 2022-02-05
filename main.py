@@ -76,6 +76,10 @@ def parse_option():
 
 def main(config):
     dataset_val_len, data_loader_train, data_loader_val, mixup_fn = build_loader(config)
+    '''
+    _,_, data_loader_train, data_loader_val, mixup_fn = build_loader(config)
+    dataset_val_len=10000
+    '''
 
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
     model = build_model(config)
@@ -159,7 +163,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     loss_meter = AverageMeter()
     norm_meter = AverageMeter()
 
-    #img_sizes = [24,32,40]
+    img_sizes = [24,32,40]
     start = time.time()
     end = time.time()
     for idx, (samples, targets) in enumerate(data_loader):
@@ -168,9 +172,9 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         targets = targets.cuda(non_blocking=True)
         '''
         '''
+        '''
         img_size = img_sizes[np.random.randint(3)]
         samples = F.interpolate(samples, size=img_size, mode = 'bicubic')
-        '''
 
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
@@ -254,6 +258,7 @@ def validate(config, data_loader, model):
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
         '''
+        #images = F.interpolate(images, size=88, mode = 'bicubic')
 
         # compute output
         output = model(images)

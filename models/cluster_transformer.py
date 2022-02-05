@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from pointconv_utils import points2img
+from .pointconv_utils import points2img, kmeans_keops
 
 
 class Mlp(nn.Module):
@@ -482,7 +482,7 @@ class ClusterTransformer(nn.Module):
                                drop=drop_rate, attn_drop=attn_drop_rate,
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
-                               downsample=downsampleif (i_layer < self.num_layers - 1) else None,
+                               downsample=downsample if (i_layer < self.num_layers - 1) else None,
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 

@@ -13,7 +13,7 @@ from torchvision import datasets, transforms
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.data import Mixup
 from timm.data import create_transform
-from timm.data.transforms import _pil_interp
+from timm.data.transforms import _str_to_pil_interpolation 
 
 from .cached_image_folder import CachedImageFolder
 from .samplers import SubsetRandomSampler
@@ -29,13 +29,9 @@ def build_loader(config):
 
     num_tasks = dist.get_world_size()
     global_rank = dist.get_rank()
-    if config.DATA.ZIP_MODE and config.DATA.CACHE_MODE == 'part':
-        indices = np.arange(dist.get_rank(), len(dataset_train), dist.get_world_size())
-        sampler_train = SubsetRandomSampler(indices)
-    else:
-        sampler_train = torch.utils.data.DistributedSampler(
-            dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-        )
+    sampler_train = torch.utils.data.DistributedSampler(
+        dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+    )
 
     indices = np.arange(dist.get_rank(), len(dataset_val), dist.get_world_size())
     sampler_val = SubsetRandomSampler(indices)
@@ -73,14 +69,8 @@ def build_dataset(is_train, config):
     transform = build_transform(is_train, config)
     if config.DATA.DATASET == 'imagenet':
         prefix = 'train' if is_train else 'val'
-        if config.DATA.ZIP_MODE:
-            ann_file = prefix + "_map.txt"
-            prefix = prefix + ".zip@/"
-            dataset = CachedImageFolder(config.DATA.DATA_PATH, ann_file, prefix, transform,
-                                        cache_mode=config.DATA.CACHE_MODE if is_train else 'part')
-        else:
-            root = os.path.join(config.DATA.DATA_PATH, prefix)
-            dataset = datasets.ImageFolder(root, transform=transform)
+        root = os.path.join(config.DATA.DATA_PATH, prefix)
+        dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 1000
     elif config.DATA.DATASET == 'cifar':
         dataset = datasets.CIFAR10(config.DATA.DATA_PATH, train=is_train, transform=transform)
@@ -116,14 +106,14 @@ def build_transform_imagenet(is_train, config):
         if config.TEST.CROP:
             size = int((256 / 224) * config.DATA.IMG_SIZE)
             t.append(
-                transforms.Resize(size, interpolation=_pil_interp(config.DATA.INTERPOLATION)),
+                transforms.Resize(size, interpolation=_str_to_pil_interpolation[config.DATA.INTERPOLATION]),
                 # to maintain same ratio w.r.t. 224 images
             )
             t.append(transforms.CenterCrop(config.DATA.IMG_SIZE))
         else:
             t.append(
                 transforms.Resize((config.DATA.IMG_SIZE, config.DATA.IMG_SIZE),
-                                  interpolation=_pil_interp(config.DATA.INTERPOLATION))
+                                  interpolation=_str_to_pil_interpolation[config.DATA.INTERPOLATION])
             )
 
     t.append(transforms.ToTensor())

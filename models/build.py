@@ -10,6 +10,7 @@ from .swin_conv import SwinTransformerConv
 from .cluster_transformer import ClusterTransformer
 from .swin_mlp import SwinMLP
 from torchvision import models
+import torch.nn as nn
 
 
 def build_model(config):
