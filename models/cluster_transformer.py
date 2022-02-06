@@ -300,25 +300,40 @@ class BasicLayer(nn.Module):
         '''
         b,d,n = pos.shape
         c = feat.shape[1]
-        # perform k-means
-        means, cluster_assignment, member_idx, cluster_mask = kmeans_keops(feat, self.k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask) # b x c x k, b x 1 x n, b x m x k, b x m x k
-        b,m,k = member_idx.shape
-        cluster_pos = pos.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,d,-1,-1), dim=2) # b x d x m x k
-        cluster_feat = feat.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,c,-1,-1), dim=2) # b x c x m x k
-        cluster_pos = cluster_pos.permute(0,3,2,1).reshape(-1,m,d) # k' x m x d
-        cluster_feat = cluster_feat.permute(0,3,2,1).reshape(-1,m,c) # k' x m x c
-        # get valid cluster id
-        valid_row = (cluster_mask.sum(1) > 0).long() # b x k
-        valid_row_idx = valid_row.view(-1).nonzero() # z
-        cluster_pos = cluster_pos[valid_row_idx]
-        cluster_feat = cluster_feat[valid_row_idx]
-        cluster_mask = cluster_mask.permute(0,2,1).view(-1,m)[valid_row_idx].unsqueeze(2) # k' x m x 1
+        if self.k>1:
+            # perform k-means
+            _, cluster_assignment, member_idx, cluster_mask = kmeans_keops(feat, self.k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask) # b x c x k, b x 1 x n, b x m x k, b x m x k
+            b,m,k = member_idx.shape
+            cluster_pos = pos.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,d,-1,-1), dim=2) # b x d x m x k
+            cluster_feat = feat.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,c,-1,-1), dim=2) # b x c x m x k
+            cluster_pos = cluster_pos.permute(0,3,2,1).reshape(-1,m,d) # k' x m x d
+            cluster_feat = cluster_feat.permute(0,3,2,1).reshape(-1,m,c) # k' x m x c
+            # get valid cluster id
+            valid_row = (cluster_mask.sum(1) > 0).long() # b x k
+            valid_row_idx = valid_row.view(-1).nonzero() # z
+            cluster_pos = cluster_pos[valid_row_idx]
+            cluster_feat = cluster_feat[valid_row_idx]
+            cluster_mask = cluster_mask.permute(0,2,1).view(-1,m)[valid_row_idx].unsqueeze(2) # k' x m x 1
+        else:
+            cluster_pos = pos.permute(0,2,1)
+            cluster_feat = feat.permute(0,2,1)
+            if mask is None:
+                cluster_mask = mask
+            else:
+                cluster_mask = mask.permute(0,2,1)
 
         for blk in self.blocks:
             if self.use_checkpoint:
                 cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask)
             else:
                 cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask)
+
+        if self.k==1:
+            new_pos = cluster_pos.permute(0,2,1)
+            new_feat = cluster_feat.permute(0,2,1)
+            if self.downsample is not None:
+                new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, mask)
+            return new_pos, new_feat, new_mask
 
         # convert back to batches
         new_pos = pos.new(b*k,m,d).zero_()
