@@ -25,7 +25,6 @@ class Mlp(nn.Module):
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
-        print('x',x.shape)
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
@@ -84,9 +83,9 @@ class ClusterAttention(nn.Module):
         attn = (q @ k.transpose(-2, -1)) # k x h x m x m
 
         # calculate bias for pos
-        pos = pos.to(feat.dtype)
-        pos[:,:,0] = pos[:,:,0].clone() / pos[:,:,0].max() # normalize
-        pos[:,:,1] = pos[:,:,1].clone() / pos[:,:,1].max()
+        pos = pos.clone().to(feat.dtype)
+        for i in range(d):
+            pos[:,:,i] = pos[:,:,i].clone() / pos[:,:,i].max() # normalize
         rel_pos = pos.unsqueeze(1) - pos.unsqueeze(2) # k x m x m x 2
         pos_bias = self.pos_mlp(rel_pos) # k x m x m x h
         pos_bias = pos_bias.permute(0,3,1,2) # k x h x m x m
@@ -213,10 +212,10 @@ class PatchMerging(nn.Module):
         """
         #assert mask is None, "irregular image should not call patch merge"
         b,c,n = feat.shape
-        max_x = pos[:,0].max().long().item()
-        max_y = pos[:,1].max().long().item()
-        h = int(torch.ceil(max_y / 2.0)*2) # make sure the number is even
-        w = int(torch.ceil(max_x / 2.0)*2)
+        max_x = pos[:,0].max()
+        max_y = pos[:,1].max()
+        h = (torch.ceil(max_y / 2.0)*2).long().item() # make sure the number is even
+        w = (torch.ceil(max_x / 2.0)*2).long().item()
         feat = points2img(pos, feat, h, w) # b x c x h x w
         if mask is not None:
             mask = points2img(pos, mask, h, w) # b x 1 x h x w
@@ -235,7 +234,7 @@ class PatchMerging(nn.Module):
         x = x.view(b,c,-1)
 
         # create new pos tensor
-        pos = feat.new(b,2,h,w).zero_()
+        pos = feat.new(b,2,h,w).zero_().long()
         hs = torch.arange(0,h).long()
         ws = torch.arange(0,w).long()
         ys,xs = torch.meshgrid(hs,ws)
@@ -247,7 +246,8 @@ class PatchMerging(nn.Module):
 
         # mask
         if mask is not None:
-            mask = nn.AdaptiveMaxPool2d((h,w))(mask)
+            mask = nn.AdaptiveMaxPool2d((h,w))(mask.float()).long()
+            mask = mask.view(b,1,-1)
 
         return pos, x, mask
 
@@ -355,7 +355,7 @@ class BasicLayer(nn.Module):
             return new_pos, new_feat, new_mask
 
         # convert back to batches
-        new_pos = pos.new(b*k,m,d).zero_()
+        new_pos = pos.new(b*k,m,d).zero_().long()
         new_feat = feat.new(b*k,m,c).zero_()
         new_mask = feat.new(b*k,m,1).zero_().long()
         new_feat[valid_row_idx] = cluster_feat
@@ -384,7 +384,7 @@ class BasicLayer(nn.Module):
             assert z==b*n, "there should not be missing points after kmeans"
             '''
         rotate_idx = torch.arange(largest_n,device=valid_mask.device).long().repeat(torch.ceil(z/largest_n).long().item())[:z]
-        new_pos = pos.new(b,d,largest_n).zero_()
+        new_pos = pos.new(b,d,largest_n).zero_().long()
         new_feat = feat.new(b,c,largest_n).zero_()
         new_mask = feat.new(b,1,largest_n).zero_().long()
         new_pos[batch_idx,:,rotate_idx] = valid_pos
@@ -398,7 +398,10 @@ class BasicLayer(nn.Module):
 
         if self.downsample is not None:
             new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
-        print('new feat',new_feat.shape)
+        '''
+        print('min kept point ratio',new_mask.sum(-1).min() / n)
+        print('avg kept point ratio',new_mask.sum() / (b*n))
+        '''
         return new_pos, new_feat, new_mask
 
     def extra_repr(self) -> str:
@@ -441,7 +444,7 @@ class PatchEmbed(nn.Module):
             x = self.norm(x)
         x = x.transpose(1, 2) # b x c x n
 
-        pos = x.new(b,2,h,w).zero_()
+        pos = x.new(b,2,h,w).zero_().long()
         hs = torch.arange(0,h).long()
         ws = torch.arange(0,w).long()
         ys,xs = torch.meshgrid(hs,ws)

@@ -15,7 +15,7 @@ def img2points(img):
     return point position and color - B x 2 x N, B x c x N
     '''
     b,c,h,w = img.shape
-    pos = img.new(b,2,h,w).zero_()
+    pos = img.new(b,2,h,w).zero_().long()
     hs = torch.arange(0,h, device=img.device).long()
     ws = torch.arange(0,w, device=img.device).long()
     ys,xs = torch.meshgrid(hs,ws)
@@ -311,9 +311,11 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     points = points.permute(0,2,1).contiguous() # b x n x c
     b,n,c = points.shape
     if pos is not None:
-        pos = pos.to(points.dtype)
+        d = pos.shape[1]
+        pos = pos.clone().to(points.dtype)
+        for i in range(d):
+            pos[:,i] = pos[:,i].clone() / pos[:,i].max()
         pos = pos.permute(0,2,1).contiguous() # b x n x d
-        d = pos.shape[2]
     rand_idx = torch.randperm(n)[:k]
     means = points[:,rand_idx,:].clone().contiguous() # b x k x c
     points_ = LazyTensor(points[:,:,None,:]) # b x n x 1 x c
