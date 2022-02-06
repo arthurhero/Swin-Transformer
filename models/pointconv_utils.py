@@ -16,8 +16,8 @@ def img2points(img):
     '''
     b,c,h,w = img.shape
     pos = img.new(b,2,h,w).zero_()
-    hs = torch.arange(0,h).float()
-    ws = torch.arange(0,w).float()
+    hs = torch.arange(0,h, device=img.device).long()
+    ws = torch.arange(0,w, device=img.device).long()
     ys,xs = torch.meshgrid(hs,ws)
     xs=xs.unsqueeze(0).expand(b,-1,-1)
     ys=ys.unsqueeze(0).expand(b,-1,-1)
@@ -286,7 +286,7 @@ def batched_bincount(mat, valid_mask=None):
     return result
 
 
-def kmeans_keops(points, k, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None):
+def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None):
     '''
     points - b x c x n
     k - number of means
@@ -373,6 +373,8 @@ def kmeans_keops(points, k, num_nearest_mean=1, num_iter=10, pos = None, pos_lam
         sorted_assignment = sorted_assignment[sorted_valid_idx]
         sorted_point_idx = sorted_point_idx[sorted_valid_idx]
     max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
+    if max_cluster_size is not None:
+        max_bin_size = max_cluster_size
     batch_idx = torch.arange(end=b,device=mean_assignment.device).long().unsqueeze(1).expand(-1,n) # b x n
     batch_idx = batch_idx.reshape(-1)
 
