@@ -5,12 +5,14 @@
 # Written by Ze Liu
 # --------------------------------------------------------
 
+import os
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from .pointconv_utils import points2img, kmeans_keops
 
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
@@ -23,6 +25,7 @@ class Mlp(nn.Module):
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
+        print('x',x.shape)
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
@@ -70,11 +73,11 @@ class ClusterAttention(nn.Module):
             feat - k x m x c, the features of points
             mask - k x m x 1, the binary mask indicating valid points
         """
-        k,m,c = feat.shape
+        k_,m,c = feat.shape
         d = pos.shape[2]
         assert c == self.dim, "dim does not accord to input"
         assert d == self.pos_dim, "pos dim does not accord to input"
-        qkv = self.qkv(x).reshape(k,m, 3, self.num_heads, c//self.num_heads).permute(2, 0, 3, 1, 4) # 3 x k x h x m x c'
+        qkv = self.qkv(feat).reshape(k_ ,m, 3, self.num_heads, c//self.num_heads).permute(2, 0, 3, 1, 4) # 3 x k x h x m x c'
         q, k, v = qkv[0], qkv[1], qkv[2]  # k x h x m x c'
 
         q = q * self.scale
@@ -94,7 +97,7 @@ class ClusterAttention(nn.Module):
 
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(k, m, c)
+        x = (attn @ v).transpose(1, 2).reshape(k_, m, c)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -130,6 +133,7 @@ class ClusterTransformerBlock(nn.Module):
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
+        self.pos_dim = pos_dim
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
 
@@ -205,7 +209,8 @@ class PatchMerging(nn.Module):
         mask - b x 1 x n
         """
         assert mask is None, "irregular image should not call patch merge"
-        feat = points2img(feat, pos) # b x c x h x w
+        b,c,n = feat.shape
+        feat = points2img(pos, feat, int(n**0.5), int(n**0.5)) # b x c x h x w
         b,c,h,w = feat.shape
         x = feat
 
@@ -231,7 +236,7 @@ class PatchMerging(nn.Module):
         pos[:,1,:,:]=ys
         pos = pos.view(b,2,-1)
 
-        return x, pos, mask
+        return pos, x, mask
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}"
@@ -277,7 +282,7 @@ class BasicLayer(nn.Module):
 
         # build blocks
         self.blocks = nn.ModuleList([
-            SwinTransformerBlock(dim=dim,
+            ClusterTransformerBlock(dim=dim,
                                  num_heads=num_heads, pos_dim=pos_dim,
                                  mlp_ratio=mlp_ratio,
                                  qkv_bias=qkv_bias, pos_mlp_bias=pos_mlp_bias, qk_scale=qk_scale,
@@ -302,7 +307,8 @@ class BasicLayer(nn.Module):
         c = feat.shape[1]
         if self.k>1:
             # perform k-means
-            _, cluster_assignment, member_idx, cluster_mask = kmeans_keops(feat, self.k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask) # b x c x k, b x 1 x n, b x m x k, b x m x k
+            with torch.no_grad():
+                _, cluster_assignment, member_idx, cluster_mask = kmeans_keops(feat, self.k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask) # b x c x k, b x 1 x n, b x m x k, b x m x k
             b,m,k = member_idx.shape
             cluster_pos = pos.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,d,-1,-1), dim=2) # b x d x m x k
             cluster_feat = feat.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,c,-1,-1), dim=2) # b x c x m x k
@@ -310,10 +316,10 @@ class BasicLayer(nn.Module):
             cluster_feat = cluster_feat.permute(0,3,2,1).reshape(-1,m,c) # k' x m x c
             # get valid cluster id
             valid_row = (cluster_mask.sum(1) > 0).long() # b x k
-            valid_row_idx = valid_row.view(-1).nonzero() # z
+            valid_row_idx = valid_row.view(-1).nonzero().squeeze() # z
             cluster_pos = cluster_pos[valid_row_idx]
             cluster_feat = cluster_feat[valid_row_idx]
-            cluster_mask = cluster_mask.permute(0,2,1).view(-1,m)[valid_row_idx].unsqueeze(2) # k' x m x 1
+            cluster_mask = cluster_mask.permute(0,2,1).reshape(-1,m)[valid_row_idx].unsqueeze(2) # k' x m x 1
         else:
             cluster_pos = pos.permute(0,2,1)
             cluster_feat = feat.permute(0,2,1)
@@ -338,7 +344,7 @@ class BasicLayer(nn.Module):
         # convert back to batches
         new_pos = pos.new(b*k,m,d).zero_()
         new_feat = feat.new(b*k,m,c).zero_()
-        new_mask = feat.new(b*k,m,1).zero_()
+        new_mask = feat.new(b*k,m,1).zero_().long()
         new_feat[valid_row_idx] = cluster_feat
         new_pos[valid_row_idx] = cluster_pos
         new_mask[valid_row_idx] = cluster_mask
@@ -350,8 +356,8 @@ class BasicLayer(nn.Module):
         largest_n = new_mask.sum(2).max() # largest sample size
         if mask is None:
             assert largest_n == n, "there should not be missing points after kmeans"
-        valid_idx = new_mask.view(-1).nonzero() # z
-        batch_idx = torch.arange(b,device=valid_idx.device).long().unsqueeze(1).expand(-1,k*m).view(-1)[valid_idx] # z
+        valid_idx = new_mask.view(-1).nonzero().squeeze() # z
+        batch_idx = torch.arange(b,device=valid_idx.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1)[valid_idx] # z
 
         valid_feat = new_feat.permute(0,2,1).view(-1,c)[valid_idx] # z x c
         valid_pos = new_pos.permute(0,2,1).view(-1,d)[valid_idx] # z x d
@@ -359,19 +365,20 @@ class BasicLayer(nn.Module):
         z = len(valid_idx)
         if mask is None:
             assert z==b*n, "there should not be missing points after kmeans"
-        rotate_idx = torch.arange(largest_n,device=valid_mask.device).long().repeat(torch.ceil(z/largest_n))[:z]
-        new_pos2 = pos.new(b,d,largest_n).zero_()
-        new_feat2 = feat.new(b,c,largest_n).zero_()
-        new_mask2 = feat.new(b,1,largest_n).zero_()
-        new_pos2[batch_idx,:,rotate_idx] = new_pos
-        new_feat2[batch_idx,:,rotate_idx] = new_feat
-        new_mask2[batch_idx,:,rotate_idx] = new_mask
+        rotate_idx = torch.arange(largest_n,device=valid_mask.device).long().repeat(torch.ceil(z/largest_n).long().item())[:z]
+        new_pos = pos.new(b,d,largest_n).zero_()
+        new_feat = feat.new(b,c,largest_n).zero_()
+        new_mask = feat.new(b,1,largest_n).zero_().long()
+        new_pos[batch_idx,:,rotate_idx] = valid_pos
+        new_feat[batch_idx,:,rotate_idx] = valid_feat
+        new_mask[batch_idx,:,rotate_idx] = valid_mask
         if mask is None:
-            assert new_mask2.sum() == b*n, "mask should not have 0 after kmeans"
-            new_mask2 = None
+            assert new_mask.sum() == b*n, "mask should not have 0 after kmeans"
+            new_mask = None
 
         if self.downsample is not None:
-            new_pos, new_feat, new_mask = self.downsample(new_pos2, new_feat2, new_mask2)
+            new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
+        print('new feat',new_feat.shape)
         return new_pos, new_feat, new_mask
 
     def extra_repr(self) -> str:
@@ -414,7 +421,7 @@ class PatchEmbed(nn.Module):
             x = self.norm(x)
         x = x.transpose(1, 2) # b x c x n
 
-        pos = img.new(b,2,h,w).zero_()
+        pos = x.new(b,2,h,w).zero_()
         hs = torch.arange(0,h).float()
         ws = torch.arange(0,w).float()
         ys,xs = torch.meshgrid(hs,ws)
@@ -442,7 +449,7 @@ class ClusterTransformer(nn.Module):
         num_classes (int): Number of classes for classification head. Default: 1000
         embed_dim (int): Patch embedding dimension. Default: 96
         pos_dim : dimension of position coordinates
-        depths (tuple(int)): Depth of each Swin Transformer layer.
+        depths (tuple(int)): Depth of each Cluster Transformer layer.
         num_heads (tuple(int)): Number of attention heads in different layers.
         mlp_ratio (float): Ratio of mlp hidden dim to embedding dim. Default: 4
         qkv_bias (bool): If True, add a learnable bias to query, key, value. Default: True

@@ -92,7 +92,7 @@ def build_imagenet_loader(config):
 
     data_loader_train = Loader(os.path.join(config.DATA.DATA_PATH,'imagenet_train.beton'), batch_size=config.DATA.BATCH_SIZE, num_workers=config.DATA.NUM_WORKERS,
             order=OrderOption.RANDOM if dist.get_world_size()>1 else OrderOption.QUASI_RANDOM, 
-            pipelines=train_pipelines, drop_last=True, distributed=True, os_cache=True) 
+            pipelines=train_pipelines, drop_last=True, distributed=dist.get_world_size()>1, os_cache=True) 
 
     val_decoder = CenterCropRGBImageDecoder((config.DATA.IMG_SIZE,config.DATA.IMG_SIZE),224/256)
     IMAGENET_MEAN = np.array([0.485, 0.456, 0.406]) * 255
@@ -177,7 +177,7 @@ def build_cifar_loader(config):
 
     data_loader_train = Loader(os.path.join(config.DATA.DATA_PATH,'cifar_train.beton'), batch_size=config.DATA.BATCH_SIZE, num_workers=config.DATA.NUM_WORKERS,
             order=OrderOption.RANDOM if dist.get_world_size()>1 else OrderOption.QUASI_RANDOM,
-            pipelines=train_pipelines, drop_last=True, distributed=True, os_cache=True)
+            pipelines=train_pipelines, drop_last=True, distributed=dist.get_world_size()>1, os_cache=True)
 
     val_decoder = SimpleRGBImageDecoder() 
     mean = np.asarray([0.4914, 0.4822, 0.4465]) * 255

@@ -35,7 +35,7 @@ def points2img(pos,pixel,h,w):
     h,w - scalar
     '''
     b,c,n = pixel.shape
-    img = pos.new(b,c,h*w).zero_()
+    img = pos.new(b,c,h*w).zero_().to(pixel.dtype)
     idx = (pos[:,1]*w+pos[:,0]).long().unsqueeze(1).expand(-1,c,-1) # B x c x N
     img.scatter_(src=pixel, index=idx, dim=2)
     return img.view(b,c,h,w)
@@ -299,6 +299,8 @@ def kmeans_keops(points, k, num_nearest_mean=1, num_iter=10, pos = None, pos_lam
     reverse_assignment - b x m x k, m is the largest cluster size, invalid position filled with -1
     valid_assignment_mask - b x m x k, if sum along m gets 0, then the cluster is invalid
     '''
+    old_dtype = points.dtype
+    points = points.to(torch.float32)
     if valid_mask is not None:
         valid_mask = valid_mask.long()
         points *= valid_mask
@@ -309,6 +311,7 @@ def kmeans_keops(points, k, num_nearest_mean=1, num_iter=10, pos = None, pos_lam
     points = points.permute(0,2,1).contiguous() # b x n x c
     b,n,c = points.shape
     if pos is not None:
+        pos = pos.to(points.dtype)
         pos = pos.permute(0,2,1).contiguous() # b x n x d
         d = pos.shape[2]
     rand_idx = torch.randperm(n)[:k]
@@ -324,7 +327,7 @@ def kmeans_keops(points, k, num_nearest_mean=1, num_iter=10, pos = None, pos_lam
         # turn excessive invalid means to nan
         means_valid_mask = valid_mask[:,0,rand_idx].unsqueeze(2) # b x k x 1
         row_sum = means_valid_mask.sum(1)[:,0] # b, check if all are invalid
-        all_zero_index = (row_sum==0).long().nonzero()
+        all_zero_index = (row_sum==0).long().nonzero().squeeze()
         means_valid_mask[all_zero_index, 0] = 1
         nan_mask = means_valid_mask / means_valid_mask # 1 is 1, 0 becomes nan
         means = means * nan_mask
@@ -366,7 +369,7 @@ def kmeans_keops(points, k, num_nearest_mean=1, num_iter=10, pos = None, pos_lam
         sorted_valid_mask = valid_mask.squeeze(1).gather(index=sorted_point_idx,dim=-1).reshape(-1) # b*n
     sorted_point_idx = sorted_point_idx.reshape(-1)
     if valid_mask is not None:
-        sorted_valid_idx = sorted_valid_mask.nonzero()
+        sorted_valid_idx = sorted_valid_mask.nonzero().squeeze()
         sorted_assignment = sorted_assignment[sorted_valid_idx]
         sorted_point_idx = sorted_point_idx[sorted_valid_idx]
     max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
@@ -386,9 +389,12 @@ def kmeans_keops(points, k, num_nearest_mean=1, num_iter=10, pos = None, pos_lam
     reverse_assignment -= 1 # blank space filled with -1
     reverse_assignment.index_put_(indices=final_idx, values=sorted_point_idx) # b x m x k
     valid_assignment_mask = (reverse_assignment > -1).long() # b x m x k
+    reverse_assignment.clamp_(min=0)
     
     if num_nearest_mean > 1:
         mean_assignment = dist.argKmin(num_nearest_mean,dim=2).long() # b x n x num_mean
+
+    means = means.to(old_dtype)
 
     return means.permute(0,2,1), mean_assignment.permute(0,2,1), reverse_assignment, valid_assignment_mask 
 

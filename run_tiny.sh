@@ -11,5 +11,5 @@ DATA_PATH=../datasets/cifar10/
 CUDA_VISIBLE_DEVICES=0,1,2,3 WORLD_SIZE=$NUM_PROC python -m torch.distributed.launch --nproc_per_node $NUM_PROC --master_port 12347 \
     main.py --cfg $CONFIG_FILE \
     --data-path $DATA_PATH \
-    --eval
+#    --eval
 #    --throughput
