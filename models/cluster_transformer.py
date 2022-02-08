@@ -321,7 +321,7 @@ class BasicLayer(nn.Module):
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                _, cluster_assignment, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=n//self.k,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask) # b x c x k, b x 1 x n, b x m x k, b x m x k
+                _, cluster_assignment, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=n//self.k,num_nearest_mean=1, num_iter=5, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask) # b x c x k, b x 1 x n, b x m x k, b x m x k
             b,m,k = member_idx.shape
             cluster_pos = pos.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,d,-1,-1), dim=2) # b x d x m x k
             cluster_feat = feat.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,c,-1,-1), dim=2) # b x c x m x k
@@ -351,8 +351,8 @@ class BasicLayer(nn.Module):
             new_pos = cluster_pos.permute(0,2,1)
             new_feat = cluster_feat.permute(0,2,1)
             if self.downsample is not None:
-                new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, mask)
-            return new_pos, new_feat, new_mask
+                new_pos, new_feat, mask = self.downsample(new_pos, new_feat, mask)
+            return new_pos, new_feat, mask
 
         # convert back to batches
         new_pos = pos.new(b*k,m,d).zero_().long()

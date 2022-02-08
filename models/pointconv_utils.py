@@ -299,6 +299,9 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     reverse_assignment - b x m x k, m is the largest cluster size, invalid position filled with -1
     valid_assignment_mask - b x m x k, if sum along m gets 0, then the cluster is invalid
     '''
+    points = points.clone()
+    if pos is not None:
+        pos = pos.clone()
     old_dtype = points.dtype
     points = points.to(torch.float32)
     if valid_mask is not None:
@@ -399,6 +402,9 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         mean_assignment = dist.argKmin(num_nearest_mean,dim=2).long() # b x n x num_mean
 
     means = means.to(old_dtype)
+    del points
+    if pos is not None:
+        del pos
 
     return means.permute(0,2,1), mean_assignment.permute(0,2,1), reverse_assignment, valid_assignment_mask 
 
