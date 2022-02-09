@@ -5,6 +5,7 @@
 # Written by Ze Liu
 # --------------------------------------------------------
 
+import math
 import os
 import torch
 import torch.nn as nn
@@ -281,7 +282,7 @@ class BasicLayer(nn.Module):
         use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
     """
 
-    def __init__(self, dim, k, depth, num_heads, pos_lambda=0.0003, pos_dim=2, 
+    def __init__(self, dim, k, cluster_size, depth, num_heads, pos_lambda=0.0003, pos_dim=2, 
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False):
 
@@ -289,6 +290,7 @@ class BasicLayer(nn.Module):
         self.dim = dim
         self.pos_lambda = pos_lambda
         self.k=k
+        self.cluster_size=cluster_size
         self.pos_dim = pos_dim
         self.depth = depth
         self.use_checkpoint = use_checkpoint
@@ -318,10 +320,12 @@ class BasicLayer(nn.Module):
         '''
         b,d,n = pos.shape
         c = feat.shape[1]
+        if self.k != 1:
+            self.k = int(math.ceil(n / float(self.cluster_size)))
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                _, cluster_assignment, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=n//self.k,num_nearest_mean=1, num_iter=5, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask) # b x c x k, b x 1 x n, b x m x k, b x m x k
+                _, cluster_assignment, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.cluster_size,num_nearest_mean=1, num_iter=5, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask) # b x c x k, b x 1 x n, b x m x k, b x m x k
             b,m,k = member_idx.shape
             cluster_pos = pos.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,d,-1,-1), dim=2) # b x d x m x k
             cluster_feat = feat.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,c,-1,-1), dim=2) # b x c x m x k
@@ -488,7 +492,7 @@ class ClusterTransformer(nn.Module):
     """
 
     def __init__(self, patch_size=4, in_chans=3, num_classes=1000,
-                 embed_dim=96, pos_dim=2, k=[64, 16, 4, 1], pos_lambda=[0.0003, 0.0001, 0.00003], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
+                 embed_dim=96, pos_dim=2, k=[64, 16, 4, 1], cluster_size=49, pos_lambda=[0.0003, 0.0001, 0.00003], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, downsample=PatchMerging,
@@ -519,6 +523,7 @@ class ClusterTransformer(nn.Module):
             layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
                                pos_dim=pos_dim,
                                k=k[i_layer],
+                               cluster_size=cluster_size,
                                pos_lambda=pos_lambda[i_layer],
                                depth=depths[i_layer],
                                num_heads=num_heads[i_layer],

@@ -69,6 +69,7 @@ def build_model(config):
                                 embed_dim=config.MODEL.SWIN.EMBED_DIM,
                                 pos_dim=config.MODEL.CLUSTER.POS_DIM,
                                 k=config.MODEL.CLUSTER.K,
+                                cluster_size=config.MODEL.CLUSTER.CLUSTER_SIZE,
                                 pos_lambda=config.MODEL.CLUSTER.POS_LAMBDA,
                                 depths=config.MODEL.SWIN.DEPTHS,
                                 num_heads=config.MODEL.SWIN.NUM_HEADS,

@@ -2,7 +2,8 @@ NUM_PROC=4
 #CONFIG_FILE=configs/swin_tiny_patch4_window7_224.yaml
 #CONFIG_FILE=configs/swin_tiny_patch1_window2_cifar_multi.yaml
 #CONFIG_FILE=configs/swin_conv_patch1_window2_cifar_multi.yaml
-CONFIG_FILE=configs/cluster_patch1_cifar_multi.yaml
+#CONFIG_FILE=configs/cluster_patch1_cifar_multi.yaml
+CONFIG_FILE=configs/cluster_patch1_cifar_multi_fix_size.yaml
 #CONFIG_FILE=configs/resnet50_cifar_multi.yaml
 
 #DATA_PATH=../datasets/imagenet/

@@ -1,6 +1,6 @@
 MODEL:
   TYPE: cluster
-  NAME: cluster_patch1_cifar_multi
+  NAME: cluster_patch1_cifar_multi_fix_size
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96
@@ -9,7 +9,8 @@ MODEL:
     PATCH_SIZE: 1
   CLUSTER:
     POS_DIM: 2
-    K: [32,8,1]
+    K: [64,16,4]
+    CLUSTER_SIZE: 32
     POS_LAMBDA: [2.0,1.0,0.5]
 DATA:
   DATASET: cifar
