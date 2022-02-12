@@ -285,27 +285,51 @@ def batched_bincount(mat, valid_mask=None):
     result.scatter_add_(dim=1, index=mat, src=ones) # b x k
     return result
 
+def init_kmeanspp(points, k):
+    '''
+    initialize kmeans++
+    points - b x n x c
+    return
+    means - b x k x c
+    '''
+    from pykeops.torch import LazyTensor
+    # get a random point
+    b,n,c = points.shape
+    idx = torch.randint(n,(b,)) # b
+    centers = points[torch.arange(b),idx] # b x c
+    centers = centers.unsqueeze(1) # b x 1 x c
+    for _ in range(k-1):
+        points_ = LazyTensor(points.unsqueeze(2)) # b x n x 1 x c
+        centers_ = LazyTensor(centers.unsqueeze(1)) # b x 1 x k x c
+        dist = ((points_ - centers_) ** 2).sum(-1) # b x n x k
+        dist_min = dist.min(dim=2).squeeze(2) # b x n
+        idx = (dist_min+1e-12).multinomial(num_samples=1).squeeze(1) # b x 1
+        new_center = points[torch.arange(b),idx] # b x c
+        new_center = new_center.unsqueeze(1) # b x 1 x c
+        centers = torch.cat([centers, new_center], dim=1)
+    return centers
 
-def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None):
+def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None, init='kmeans++'):
     '''
     points - b x c x n
     k - number of means
     pos - postion of points, b x d x n
     pos_lambda - lambda of pos in dist calculation
     valid_mask - b x 1 x n, binary mask indicating the valid points
+    init - method of initialization, kmeans++ or random
     return
     means - b x c x k
     mean_assignment - b x num_nearest_mean x n
     reverse_assignment - b x m x k, m is the largest cluster size, invalid position filled with -1
     valid_assignment_mask - b x m x k, if sum along m gets 0, then the cluster is invalid
     '''
-    points = points.clone()
+    points = points.detach()
     if pos is not None:
-        pos = pos.clone()
+        pos = pos.detach()
     old_dtype = points.dtype
     points = points.to(torch.float32)
     if valid_mask is not None:
-        valid_mask = valid_mask.long()
+        valid_mask = valid_mask.detach().long()
         points *= valid_mask
         if pos is not None:
             pos *= valid_mask # make sure invalid pos and points are all 0
@@ -315,20 +339,26 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     b,n,c = points.shape
     if pos is not None:
         d = pos.shape[1]
-        pos = pos.clone().to(points.dtype)
+        pos = pos.to(points.dtype)
         for i in range(d):
             pos[:,i] = pos[:,i].clone() / pos[:,i].max()
         pos = pos.permute(0,2,1).contiguous() # b x n x d
-    rand_idx = torch.randperm(n)[:k]
-    means = points[:,rand_idx,:].clone().contiguous() # b x k x c
+    if init=='random':
+        rand_idx = torch.randperm(n)[:k]
+        means = points[:,rand_idx,:].clone().contiguous() # b x k x c
+        if pos is not None:
+            means_pos = pos[:,rand_idx,:].clone().contiguous() # b x k x d
+    elif init=='kmeans++':
+        means = init_kmeanspp(points, k) # b x k x c
+        if pos is not None:
+            means_pos = init_kmeanspp(pos, k) # b x k x d
     points_ = LazyTensor(points[:,:,None,:]) # b x n x 1 x c
     means_ = LazyTensor(means[:,None,:,:]) # b x 1 x k x c
     if pos is not None:
-        means_pos = pos[:,rand_idx,:].clone().contiguous() # b x k x d
         pos_ = LazyTensor(pos[:,:,None,:]) # b x n x 1 x d
         means_pos_ = LazyTensor(means_pos[:,None,:,:]) # b x 1 x k x d
 
-    if valid_mask is not None:
+    if init=='random' and valid_mask is not None:
         # turn excessive invalid means to nan
         means_valid_mask = valid_mask[:,0,rand_idx].unsqueeze(2) # b x k x 1
         row_sum = means_valid_mask.sum(1)[:,0] # b, check if all are invalid

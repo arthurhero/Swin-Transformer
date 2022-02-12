@@ -325,7 +325,7 @@ class BasicLayer(nn.Module):
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                _, cluster_assignment, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.cluster_size,num_nearest_mean=1, num_iter=5, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask) # b x c x k, b x 1 x n, b x m x k, b x m x k
+                _, cluster_assignment, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.cluster_size,num_nearest_mean=1, num_iter=5, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='kmeans++') # b x c x k, b x 1 x n, b x m x k, b x m x k
             b,m,k = member_idx.shape
             cluster_pos = pos.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,d,-1,-1), dim=2) # b x d x m x k
             cluster_feat = feat.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,c,-1,-1), dim=2) # b x c x m x k
@@ -403,9 +403,9 @@ class BasicLayer(nn.Module):
         if self.downsample is not None:
             new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
         '''
+        '''
         print('min kept point ratio',new_mask.sum(-1).min() / n)
         print('avg kept point ratio',new_mask.sum() / (b*n))
-        '''
         return new_pos, new_feat, new_mask
 
     def extra_repr(self) -> str:
