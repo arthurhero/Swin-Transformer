@@ -310,7 +310,7 @@ def init_kmeanspp(points, k):
         centers = torch.cat([centers, new_center], dim=1)
     return centers
 
-def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None, init='kmeans++'):
+def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None, init='random', equal_size=False):
     '''
     points - b x c x n
     k - number of means
@@ -318,10 +318,14 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     pos_lambda - lambda of pos in dist calculation
     valid_mask - b x 1 x n, binary mask indicating the valid points
     init - method of initialization, kmeans++ or random
+    max_cluster_size - do random sampling in larger clusters; must be >= n/k
+                 only affects reverse_assignment and valid_assignment_mask
+    equal_size - bool, clusters to have equal size, ceil(n/k)
+                 only affects reverse_assignment and valid_assignment_mask
     return
     means - b x c x k
     mean_assignment - b x num_nearest_mean x n
-    reverse_assignment - b x m x k, m is the largest cluster size, invalid position filled with -1
+    reverse_assignment - b x m x k, m is the largest cluster size, invalid position filled with 0
     valid_assignment_mask - b x m x k, if sum along m gets 0, then the cluster is invalid
     '''
     points = points.detach()
@@ -338,6 +342,8 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     from pykeops.torch import LazyTensor
     points = points.permute(0,2,1).contiguous() # b x n x c
     b,n,c = points.shape
+    if max_cluster_size is not None:
+        assert max_cluster_size>= math.ceil(n/k), "max_cluster_size should not be smaller than average"
     if pos is not None:
         d = pos.shape[1]
         pos = pos.to(points.dtype)
@@ -398,20 +404,30 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         dist = dist / c + pos_lambda * dist_pos / d
     mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
 
+    max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
+    print("max bin size",max_bin_size, "avg size", n//k)
+    if max_cluster_size is not None:
+        max_bin_size = min(max_cluster_size, max_bin_size)
+    if equal_size:
+        max_bin_size = int(math.ceil(n/k))
     # get reverse_assignment
     sorted_assignment, sorted_point_idx = mean_assignment.squeeze(2).sort(dim=-1, descending=False) # b x n, b x n
-    sorted_assignment = sorted_assignment.reshape(-1)
     if valid_mask is not None:
-        sorted_valid_mask = valid_mask.squeeze(1).gather(index=sorted_point_idx,dim=-1).reshape(-1) # b*n
+        sorted_valid_mask = valid_mask.squeeze(1).gather(index=sorted_point_idx,dim=-1) # b x n
+        if equal_size:
+            # rank the valid points first
+            sorted_valid_mask, vf_idx = sorted_valid_mask.sort(dim=-1,descending=True,stable=True)
+            sorted_point_idx = sorted_point_idx.gather(index=vf_idx,dim=-1)
+        sorted_valid_mask = sorted_valid_mask.reshape(-1)
+    if equal_size:
+        sorted_assignment = torch.arange(end=k,device=mean_assignment.device).long().repeat_interleave(max_bin_size)[:n]
+        sorted_assignment = sorted_assignment.unsqueeze(0).expand(b,-1)
+    sorted_assignment = sorted_assignment.reshape(-1)
     sorted_point_idx = sorted_point_idx.reshape(-1)
     if valid_mask is not None:
         sorted_valid_idx = sorted_valid_mask.nonzero().squeeze()
         sorted_assignment = sorted_assignment[sorted_valid_idx]
         sorted_point_idx = sorted_point_idx[sorted_valid_idx]
-    max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
-    print("max bin size",max_bin_size, "max clus size",max_cluster_size)
-    if max_cluster_size is not None:
-        max_bin_size = max_cluster_size
     batch_idx = torch.arange(end=b,device=mean_assignment.device).long().unsqueeze(1).expand(-1,n) # b x n
     batch_idx = batch_idx.reshape(-1)
 

@@ -211,7 +211,7 @@ class PatchMerging(nn.Module):
         feat - b x c x n
         mask - b x 1 x n
         """
-        #assert mask is None, "irregular image should not call patch merge"
+        assert mask is None, "irregular image should not call patch merge"
         b,c,n = feat.shape
         max_x = pos[:,0].max()
         max_y = pos[:,1].max()
@@ -345,7 +345,7 @@ class BasicLayer(nn.Module):
                     print("faiss max clus", torch.LongTensor(I).squeeze().bincount().max())
                     '''
 
-                _, cluster_assignment, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.cluster_size,num_nearest_mean=1, num_iter=5, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random') # b x c x k, b x 1 x n, b x m x k, b x m x k
+                _, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.cluster_size,num_nearest_mean=1, num_iter=5, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random', equal_size=True) # b x c x k, b x 1 x n, b x m x k, b x m x k
             b,m,k = member_idx.shape
             cluster_pos = pos.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,d,-1,-1), dim=2) # b x d x m x k
             cluster_feat = feat.unsqueeze(3).expand(-1,-1,-1,k).gather(index=member_idx.unsqueeze(1).expand(-1,c,-1,-1), dim=2) # b x c x m x k
@@ -391,11 +391,6 @@ class BasicLayer(nn.Module):
 
         # filter out valid points
         largest_n = new_mask.sum(2).max() # largest sample size
-        '''
-        # not keeping all points in clusters anymore
-        if mask is None:
-            assert largest_n == n, "there should not be missing points after kmeans"
-            '''
         valid_idx = new_mask.view(-1).nonzero().squeeze() # z
         batch_idx = torch.arange(b,device=valid_idx.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1)[valid_idx] # z
 
@@ -404,9 +399,9 @@ class BasicLayer(nn.Module):
         valid_mask = new_mask.permute(0,2,1).view(-1,1)[valid_idx] # z x 1
         z = len(valid_idx)
         '''
+        '''
         if mask is None:
             assert z==b*n, "there should not be missing points after kmeans"
-            '''
         rotate_idx = torch.arange(largest_n,device=valid_mask.device).long().repeat(torch.ceil(z/largest_n).long().item())[:z]
         new_pos = pos.new(b,d,largest_n).zero_().long()
         new_feat = feat.new(b,c,largest_n).zero_()
@@ -415,10 +410,10 @@ class BasicLayer(nn.Module):
         new_feat[batch_idx,:,rotate_idx] = valid_feat
         new_mask[batch_idx,:,rotate_idx] = valid_mask
         '''
+        '''
         if mask is None:
             assert new_mask.sum() == b*n, "mask should not have 0 after kmeans"
             new_mask = None
-            '''
 
         if self.downsample is not None:
             new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
