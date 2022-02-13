@@ -299,10 +299,11 @@ def init_kmeanspp(points, k):
     centers = points[torch.arange(b),idx] # b x c
     centers = centers.unsqueeze(1) # b x 1 x c
     for _ in range(k-1):
-        points_ = LazyTensor(points.unsqueeze(2)) # b x n x 1 x c
-        centers_ = LazyTensor(centers.unsqueeze(1)) # b x 1 x k x c
+        points_ = LazyTensor(points[:,:,None,:]) # b x n x 1 x c
+        centers_ = LazyTensor(centers[:,None,:,:]) # b x 1 x k x c
         dist = ((points_ - centers_) ** 2).sum(-1) # b x n x k
-        dist_min = dist.min(dim=2).squeeze(2) # b x n
+        dist_min = dist.min(dim=2)
+        dist_min = dist_min.squeeze(2) # b x n
         idx = (dist_min+1e-12).multinomial(num_samples=1).squeeze(1) # b x 1
         new_center = points[torch.arange(b),idx] # b x c
         new_center = new_center.unsqueeze(1) # b x 1 x c
@@ -408,6 +409,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         sorted_assignment = sorted_assignment[sorted_valid_idx]
         sorted_point_idx = sorted_point_idx[sorted_valid_idx]
     max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
+    print("max bin size",max_bin_size, "max clus size",max_cluster_size)
     if max_cluster_size is not None:
         max_bin_size = max_cluster_size
     batch_idx = torch.arange(end=b,device=mean_assignment.device).long().unsqueeze(1).expand(-1,n) # b x n

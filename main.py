@@ -172,9 +172,9 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         targets = targets.cuda(non_blocking=True)
         '''
         '''
-        '''
         img_size = img_sizes[np.random.randint(3)]
         samples = F.interpolate(samples, size=img_size, mode = 'bicubic')
+        '''
 
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
