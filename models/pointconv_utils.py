@@ -379,7 +379,6 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
             means_pos_ = LazyTensor(means_pos[:,None,:,:]) # b x 1 x k x d
 
     for i in range(num_iter):
-        #print('means',means)
         # find nearest mean
         dist = ((points_ - means_) ** 2).sum(-1) # b x n x k
         if pos is not None:
@@ -391,7 +390,6 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         means.zero_() # content of lazytensor will change with the original tensor
         means.scatter_add_(dim=1, index=mean_assignment.expand(-1,-1,c), src=points) # invalid points will contribute 0
         bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask) # b x k
-        #print('bin_size', bin_size)
         means /= bin_size.unsqueeze(2)
         if pos is not None:
             means_pos.zero_()
@@ -405,7 +403,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
 
     max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
-    print("max bin size",max_bin_size, "avg size", n//k)
+    #print("max bin size",max_bin_size, "avg size", n//k)
     if max_cluster_size is not None:
         max_bin_size = min(max_cluster_size, max_bin_size)
     if equal_size:

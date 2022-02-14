@@ -172,9 +172,9 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         targets = targets.cuda(non_blocking=True)
         '''
         '''
+        '''
         img_size = img_sizes[np.random.randint(3)]
         samples = F.interpolate(samples, size=img_size, mode = 'bicubic')
-        '''
 
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
@@ -206,7 +206,15 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             optimizer.zero_grad()
             if config.AMP_OPT_LEVEL != "O0":
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    '''
+                    print("before bw", torch.cuda.memory_allocated()/1024/1024, "mb")
+                    print("before bw max", torch.cuda.max_memory_allocated()/1024/1024, "mb")
+                    '''
                     scaled_loss.backward()
+                    '''
+                    print("after bw", torch.cuda.memory_allocated()/1024/1024, "mb")
+                    print("after bw max", torch.cuda.max_memory_allocated()/1024/1024, "mb")
+                    '''
                 if config.TRAIN.CLIP_GRAD:
                     grad_norm = torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), config.TRAIN.CLIP_GRAD)
                 else:
@@ -258,7 +266,7 @@ def validate(config, data_loader, model):
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
         '''
-        #images = F.interpolate(images, size=88, mode = 'bicubic')
+        #images = F.interpolate(images, size=40, mode = 'bicubic')
 
         # compute output
         output = model(images)
