@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from .pointconv_utils import points2img, kmeans_keops
+import torch_scatter
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
@@ -214,8 +215,8 @@ class PatchMerging(nn.Module):
         """
         assert mask is None, "irregular image should not call patch merge"
         b,c,n = feat.shape
-        max_x = pos[:,0].max()
-        max_y = pos[:,1].max()
+        max_x = pos[:,0].max()+1
+        max_y = pos[:,1].max()+1
         h = (torch.ceil(max_y / 2.0)*2).long().item() # make sure the number is even
         w = (torch.ceil(max_x / 2.0)*2).long().item()
         feat = points2img(pos, feat, h, w) # b x c x h x w
@@ -336,12 +337,15 @@ class BasicLayer(nn.Module):
             cluster_pos = pos.permute(0,2,1).reshape(-1,d)[member_idx].reshape(b,m,k,d).permute(0,2,1,3).reshape(-1,m,d)
             cluster_feat = feat.permute(0,2,1).reshape(-1,c)[member_idx].reshape(b,m,k,c).permute(0,2,1,3).reshape(-1,m,c)
             # get valid cluster id
-            if mask is not None or not self.equal_size:
+            irregular = cluster_mask.min() == 0
+            if irregular:
                 valid_row = (cluster_mask.sum(1) > 0).long() # b x k
                 valid_row_idx = valid_row.view(-1).nonzero().squeeze() # z
                 cluster_pos = cluster_pos[valid_row_idx]
                 cluster_feat = cluster_feat[valid_row_idx]
                 cluster_mask = cluster_mask.permute(0,2,1).reshape(-1,m)[valid_row_idx].unsqueeze(2) # k' x m x 1
+                cluster_pos *= cluster_mask
+                cluster_feat *= cluster_mask
             else:
                 cluster_mask = None
         else:
@@ -352,11 +356,53 @@ class BasicLayer(nn.Module):
             else:
                 cluster_mask = mask.permute(0,2,1)
 
+        shift_sign=1
+        pos_orig = cluster_pos.reshape(b,-1,d).clone()
+        h=w=pos.max()+1
+        pos_orig = pos_orig[:,:,1:]*w+pos_orig[:,:,0:1]
+        m_=2 # window size
+        # precompute pos and mask
+        cluster_pos_orig = cluster_pos
+        cluster_pos_ = cluster_pos.reshape(b,-1,d)
+        cluster_pos_ = torch_scatter.scatter_add(out=torch.zeros(b,n,d,device=feat.device,dtype=pos.dtype), index=pos_orig.expand(-1,-1,d), src=cluster_pos_, dim=1).reshape(b,h,w,d)
+        cluster_pos_ = cluster_pos_.view(b,h//m_,m_,w//m_,m_,d).permute(0,1,3,2,4,5).reshape(-1,m_*m_,d)
+        if cluster_mask is not None:
+            cluster_mask_orig = cluster_mask
+            cluster_mask_ = cluster_mask.reshape(b,-1,1)
+            cluster_mask_ = torch_scatter.scatter_add(out=torch.zeros(b,n,1,device=feat.device,dtype=cluster_mask.dtype), index=pos_orig, src=cluster_mask_, dim=1).reshape(b,h,w,1)
+            cluster_mask_ = cluster_mask_.view(b,h//m_,m_,w//m_,m_,1).permute(0,1,3,2,4,5).reshape(-1,m_*m_,1)
         for blk in self.blocks:
             if self.use_checkpoint:
                 cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask)
             else:
                 cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask)
+            '''
+            '''
+            # shift
+            # TODO: connect to config 
+            # TODO: add impl for irregular input
+            '''
+            cluster_feat = cluster_feat.reshape(b,-1,c).roll(shift_sign*(m//2),1).reshape(-1,m,c)
+            cluster_pos = cluster_pos.reshape(b,-1,d).roll(shift_sign*(m//2),1).reshape(-1,m,d)
+            if cluster_mask is not None:
+                cluster_mask = cluster_mask.reshape(b,-1,1).roll(shift_sign*(m//2),1).reshape(-1,m,1)
+                '''
+            if shift_sign > 0:
+                cluster_feat = cluster_feat.reshape(b,-1,c)
+                cluster_feat = torch_scatter.scatter_add(out=torch.zeros(b,n,c,device=feat.device,dtype=feat.dtype),index=pos_orig.expand(-1,-1,c), src=cluster_feat, dim=1).reshape(b,h,w,c)
+                cluster_feat = cluster_feat.view(b,h//m_,m_,w//m_,m_,c).permute(0,1,3,2,4,5).reshape(-1,m_*m_,c)
+                cluster_pos = cluster_pos_
+                if cluster_mask is not None:
+                    cluster_mask = cluster_mask_
+            else:
+                cluster_feat = cluster_feat.reshape(b,h//m_,w//m_,m_,m_,c).permute(0,1,3,2,4,5).reshape(b,-1,c)
+                cluster_feat = cluster_feat.gather(index=pos_orig.expand(-1,-1,c), dim=1).reshape(-1,m,c)
+                cluster_pos = cluster_pos_orig
+                if cluster_mask is not None:
+                    cluster_mask = cluster_mask_orig
+                    cluster_feat *= cluster_mask
+
+            shift_sign *= -1
 
         if self.k==1:
             new_pos = cluster_pos.permute(0,2,1)
@@ -366,7 +412,7 @@ class BasicLayer(nn.Module):
             return new_pos, new_feat, mask
 
         # convert back to batches
-        if mask is not None or not self.equal_size:
+        if irregular:
             new_pos = pos.new(b*k,m,d).zero_().long()
             new_feat = feat.new(b*k,m,c).zero_()
             new_mask = feat.new(b*k,m,1).zero_().long()
@@ -383,7 +429,7 @@ class BasicLayer(nn.Module):
         new_pos = new_pos.reshape(b,k,m,d).permute(0,3,1,2).reshape(b,d,-1) # b x d x n
 
         # filter out valid points
-        if mask is not None or not self.equal_size:
+        if irregular:
             largest_n = new_mask.sum(2).max() # largest sample size
             valid_idx = new_mask.view(-1).nonzero().squeeze() # z
             batch_idx = torch.arange(b,device=valid_idx.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1)[valid_idx] # z

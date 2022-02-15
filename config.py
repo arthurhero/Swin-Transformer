@@ -88,6 +88,7 @@ _C.MODEL.CLUSTER.CLUSTER_SIZE = 16
 _C.MODEL.CLUSTER.POS_LAMBDA = [0.0003,0.0001,0.00003,0]
 _C.MODEL.CLUSTER.POS_MLP_BIAS = True
 _C.MODEL.CLUSTER.EQUAL_SIZE = False
+_C.MODEL.CLUSTER.SHIFT = False 
 
 # -----------------------------------------------------------------------------
 # Training settings
