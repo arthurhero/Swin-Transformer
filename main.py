@@ -266,7 +266,7 @@ def validate(config, data_loader, model):
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
         '''
-        #images = F.interpolate(images, size=40, mode = 'bicubic')
+        #images = F.interpolate(images, size=88, mode = 'bicubic')
 
         # compute output
         output = model(images)
