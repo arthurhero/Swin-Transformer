@@ -350,6 +350,13 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         for i in range(d):
             pos[:,i] = pos[:,i].clone() / pos[:,i].max()
         pos = pos.permute(0,2,1).contiguous() # b x n x d
+        # print mean and var
+        feat_mean = feat.mean()
+        feat_var = feat.view(-1).var(dim=0, unbiased=True)
+        pos_mean = pos.mean()
+        pos_var = pos.view(-1).var(dim=0, unbiased=True)
+        print("feat mean var",feat_mean, feat_var)
+        print("pos mean var",pos_mean, pos_var)
     if init=='random':
         rand_idx = torch.randperm(n)[:k]
         means = points[:,rand_idx,:].clone().contiguous() # b x k x c

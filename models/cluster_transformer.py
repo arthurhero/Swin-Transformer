@@ -356,56 +356,11 @@ class BasicLayer(nn.Module):
             else:
                 cluster_mask = mask.permute(0,2,1)
 
-        shift=False
-        if self.k > 1 and shift:
-            shift_sign=1
-            pos_orig = cluster_pos.reshape(b,-1,d).clone()
-            h=w=pos.max()+1
-            pos_orig = pos_orig[:,:,1:]*w+pos_orig[:,:,0:1]
-            m_=2 # window size
-            # precompute pos and mask
-            cluster_pos_orig = cluster_pos
-            cluster_pos_ = cluster_pos.reshape(b,-1,d)
-            cluster_pos_ = torch_scatter.scatter_add(out=torch.zeros(b,n,d,device=feat.device,dtype=pos.dtype), index=pos_orig.expand(-1,-1,d), src=cluster_pos_, dim=1).reshape(b,h,w,d)
-            cluster_pos_ = cluster_pos_.view(b,h//m_,m_,w//m_,m_,d).permute(0,1,3,2,4,5).reshape(-1,m_*m_,d)
-            if cluster_mask is not None:
-                cluster_mask_orig = cluster_mask
-                cluster_mask_ = cluster_mask.reshape(b,-1,1)
-                cluster_mask_ = torch_scatter.scatter_add(out=torch.zeros(b,n,1,device=feat.device,dtype=cluster_mask.dtype), index=pos_orig, src=cluster_mask_, dim=1).reshape(b,h,w,1)
-                cluster_mask_ = cluster_mask_.view(b,h//m_,m_,w//m_,m_,1).permute(0,1,3,2,4,5).reshape(-1,m_*m_,1)
         for blk in self.blocks:
             if self.use_checkpoint:
                 cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask)
             else:
                 cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask)
-            '''
-            '''
-            if self.k>1 and shift:
-                # shift
-                # TODO: connect to config 
-                # TODO: add impl for irregular input
-                '''
-                cluster_feat = cluster_feat.reshape(b,-1,c).roll(shift_sign*(m//2),1).reshape(-1,m,c)
-                cluster_pos = cluster_pos.reshape(b,-1,d).roll(shift_sign*(m//2),1).reshape(-1,m,d)
-                if cluster_mask is not None:
-                    cluster_mask = cluster_mask.reshape(b,-1,1).roll(shift_sign*(m//2),1).reshape(-1,m,1)
-                    '''
-                if shift_sign > 0:
-                    cluster_feat = cluster_feat.reshape(b,-1,c)
-                    cluster_feat = torch_scatter.scatter_add(out=torch.zeros(b,n,c,device=feat.device,dtype=feat.dtype),index=pos_orig.expand(-1,-1,c), src=cluster_feat, dim=1).reshape(b,h,w,c)
-                    cluster_feat = cluster_feat.view(b,h//m_,m_,w//m_,m_,c).permute(0,1,3,2,4,5).reshape(-1,m_*m_,c)
-                    cluster_pos = cluster_pos_
-                    if cluster_mask is not None:
-                        cluster_mask = cluster_mask_
-                else:
-                    cluster_feat = cluster_feat.reshape(b,h//m_,w//m_,m_,m_,c).permute(0,1,3,2,4,5).reshape(b,-1,c)
-                    cluster_feat = cluster_feat.gather(index=pos_orig.expand(-1,-1,c), dim=1).reshape(-1,m,c)
-                    cluster_pos = cluster_pos_orig
-                    if cluster_mask is not None:
-                        cluster_mask = cluster_mask_orig
-                        cluster_feat *= cluster_mask
-             
-                shift_sign *= -1
 
         if self.k==1:
             new_pos = cluster_pos.permute(0,2,1)
@@ -558,8 +513,7 @@ class ClusterTransformer(nn.Module):
         self.embed_dim = embed_dim
         self.pos_dim = pos_dim
         self.patch_norm = patch_norm
-        #self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
-        self.num_features = int(embed_dim * 2 ** min(2,(self.num_layers - 1)))
+        self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
         self.mlp_ratio = mlp_ratio
 
         # split image into non-overlapping patches
@@ -589,8 +543,7 @@ class ClusterTransformer(nn.Module):
                                drop=drop_rate, attn_drop=attn_drop_rate,
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
-                               #downsample=downsample if (i_layer < self.num_layers - 1) else None,
-                               downsample=downsample if (i_layer < 2) else None,
+                               downsample=downsample if (i_layer < self.num_layers - 1) else None,
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 
