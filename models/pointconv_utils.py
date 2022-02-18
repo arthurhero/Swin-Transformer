@@ -347,21 +347,27 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     if pos is not None:
         d = pos.shape[1]
         pos = pos.to(points.dtype)
-        for i in range(d):
-            pos[:,i] = pos[:,i].clone() / pos[:,i].max()
         pos = pos.permute(0,2,1).contiguous() # b x n x d
-        # print mean and var
-        feat_mean = feat.mean()
-        feat_var = feat.view(-1).var(dim=0, unbiased=True)
+        # normalize mean and std
+        '''
+        feat_mean = points.mean()
+        feat_std = points.view(-1).std(dim=0, unbiased=True)
         pos_mean = pos.mean()
-        pos_var = pos.view(-1).var(dim=0, unbiased=True)
-        print("feat mean var",feat_mean, feat_var)
-        print("pos mean var",pos_mean, pos_var)
+        pos_std = pos.view(-1).std(dim=0, unbiased=True)
+        print("feat mean std",feat_mean, feat_std)
+        print("pos mean std",pos_mean, pos_std)
+        points = (points-feat_mean) / feat_std
+        pos = (pos-pos_mean) / pos_std
+        '''
     if init=='random':
         rand_idx = torch.randperm(n)[:k]
         means = points[:,rand_idx,:].clone().contiguous() # b x k x c
         if pos is not None:
-            means_pos = pos[:,rand_idx,:].clone().contiguous() # b x k x d
+            #means_pos = pos[:,rand_idx,:].clone().contiguous() # b x k x d
+            ys,xs = torch.meshgrid(torch.arange(int(k**0.5)), torch.arange(int(k**0.5)))
+            pi = (ys*int((n//k)**0.5)+int((n//k)**0.5)//2)*int(n**0.5) + xs*int((n//k)**0.5)+int((n//k)**0.5)//2
+            means_pos = pos[:,pi.view(-1),:].clone().contiguous()-0.5 # b x k x d
+            print('mean pos', means_pos[0,:10])
     elif init=='kmeans++':
         means = init_kmeanspp(points, k) # b x k x c
         if pos is not None:
@@ -390,8 +396,12 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         dist = ((points_ - means_) ** 2).sum(-1) # b x n x k
         if pos is not None:
             dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
-            dist = dist / c + pos_lambda * dist_pos / d
+            #dist_pos = (pos_ - means_pos_).abs().max(dim=-1) # b x n x k
+            #dist = dist / c + (pos_lambda / d) * dist_pos
+            #dist = dist_pos
         mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
+        max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
+        print("iter, max bin size", i, max_bin_size)
 
         # re-compute the means
         means.zero_() # content of lazytensor will change with the original tensor
@@ -406,10 +416,15 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     dist = ((points_ - means_) ** 2).sum(-1)
     if pos is not None:
         dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
-        dist = dist / c + pos_lambda * dist_pos / d
+        #dist_pos = (pos_ - means_pos_).abs().max(dim=-1) # b x n x k
+        #dist = dist / c + (pos_lambda / d) * dist_pos
+        #dist = dist_pos
     mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
+    shortest_dist = dist.min(dim=2)
+    print("max shortest dist", shortest_dist.max())
 
     max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
+    print("max bin size", max_bin_size)
     #print("max bin size",max_bin_size, "avg size", n//k)
     if max_cluster_size is not None:
         max_bin_size = min(max_cluster_size, max_bin_size)

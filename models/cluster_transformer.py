@@ -213,7 +213,7 @@ class PatchMerging(nn.Module):
         feat - b x c x n
         mask - b x 1 x n
         """
-        assert mask is None, "irregular image should not call patch merge"
+        #assert mask is None, "irregular image should not call patch merge"
         b,c,n = feat.shape
         max_x = pos[:,0].max()+1
         max_y = pos[:,1].max()+1
@@ -321,6 +321,7 @@ class BasicLayer(nn.Module):
         feat - b x c x n
         mask - b x 1 x n
         '''
+        self.equal_size = False
         b,d,n = pos.shape
         c = feat.shape[1]
         if self.k != 1:
@@ -329,6 +330,7 @@ class BasicLayer(nn.Module):
             # perform k-means
             with torch.no_grad():
                 k=self.k
+                print("k,cluster size", self.k, self.cluster_size)
                 _, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.cluster_size,num_nearest_mean=1, num_iter=5, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random', equal_size=self.equal_size) # b x c x k, b x 1 x n, b x m x k, b x m x k
             b,m,k = member_idx.shape
             batch_tmp = torch.arange(b,device=feat.device).long().unsqueeze(1).expand(-1,m*k)
@@ -396,8 +398,10 @@ class BasicLayer(nn.Module):
             valid_pos = new_pos.permute(0,2,1).view(-1,d)[valid_idx] # z x d
             valid_mask = new_mask.permute(0,2,1).view(-1,1)[valid_idx] # z x 1
             z = len(valid_idx)
+            '''
             if mask is None:
                 assert z==b*n, "there should not be missing points after kmeans"
+                '''
             rotate_idx = torch.arange(largest_n,device=valid_mask.device).long().repeat(torch.ceil(z/largest_n).long().item())[:z]
             new_pos = pos.new(b,d,largest_n).zero_().long()
             new_feat = feat.new(b,c,largest_n).zero_()
@@ -405,9 +409,11 @@ class BasicLayer(nn.Module):
             new_pos[batch_idx,:,rotate_idx] = valid_pos
             new_feat[batch_idx,:,rotate_idx] = valid_feat
             new_mask[batch_idx,:,rotate_idx] = valid_mask
+            '''
             if mask is None:
                 assert new_mask.sum() == b*n, "mask should not have 0 after kmeans"
                 new_mask = None
+                '''
 
         if self.downsample is not None:
             new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
