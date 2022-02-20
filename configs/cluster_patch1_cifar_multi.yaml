@@ -9,8 +9,11 @@ MODEL:
     PATCH_SIZE: 1
   CLUSTER:
     POS_DIM: 2
-    K: [32,8,1]
-    POS_LAMBDA: [2.0,1.0,0.5]
+    K: [0,0,0]
+    CLUSTER_SIZE: 16
+    MAX_CLUSTER_SIZE: 0
+    POS_LAMBDA: [100.0,100.0,100.0]
+    EQUAL_SIZE: False
 DATA:
   DATASET: cifar
   IMG_SIZE: 32

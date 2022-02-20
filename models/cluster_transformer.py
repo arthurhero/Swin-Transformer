@@ -268,6 +268,8 @@ class BasicLayer(nn.Module):
     Args:
         dim (int): Number of input channels.
         k: number of clusters in k-means
+        cluster_size: the avg cluster size (priority above k)
+        max_cluster_size: maximum cluster size
         depth (int): Number of blocks.
         num_heads (int): Number of attention heads.
         pos_lambda: lambda for pos in k-means
@@ -284,7 +286,7 @@ class BasicLayer(nn.Module):
         use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
     """
 
-    def __init__(self, dim, k, cluster_size, equal_size, depth, num_heads, pos_lambda=0.0003, pos_dim=2, 
+    def __init__(self, dim, k, cluster_size, max_cluster_size, equal_size, depth, num_heads, pos_lambda=0.0003, pos_dim=2, 
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False):
 
@@ -293,6 +295,7 @@ class BasicLayer(nn.Module):
         self.pos_lambda = pos_lambda
         self.k=k
         self.cluster_size=cluster_size
+        self.max_cluster_size = None if max_cluster_size==0 else max_cluster_size
         self.pos_dim = pos_dim
         self.depth = depth
         self.use_checkpoint = use_checkpoint
@@ -321,17 +324,15 @@ class BasicLayer(nn.Module):
         feat - b x c x n
         mask - b x 1 x n
         '''
-        self.equal_size = False
         b,d,n = pos.shape
         c = feat.shape[1]
-        if self.k != 1:
+        if self.k == 0 or self.cluster_size != 0:
             self.k = int(math.ceil(n / float(self.cluster_size)))
         if self.k>1:
             # perform k-means
             with torch.no_grad():
                 k=self.k
-                print("k,cluster size", self.k, self.cluster_size)
-                _, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.cluster_size,num_nearest_mean=1, num_iter=5, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random', equal_size=self.equal_size) # b x c x k, b x 1 x n, b x m x k, b x m x k
+                _, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random', equal_size=self.equal_size) # b x c x k, b x 1 x n, b x m x k, b x m x k
             b,m,k = member_idx.shape
             batch_tmp = torch.arange(b,device=feat.device).long().unsqueeze(1).expand(-1,m*k)
             member_idx = member_idx.view(b,-1)
@@ -410,10 +411,9 @@ class BasicLayer(nn.Module):
             new_feat[batch_idx,:,rotate_idx] = valid_feat
             new_mask[batch_idx,:,rotate_idx] = valid_mask
             '''
-            if mask is None:
-                assert new_mask.sum() == b*n, "mask should not have 0 after kmeans"
+            '''
+            if new_mask.min() == 1:
                 new_mask = None
-                '''
 
         if self.downsample is not None:
             new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
@@ -507,7 +507,7 @@ class ClusterTransformer(nn.Module):
     """
 
     def __init__(self, patch_size=4, in_chans=3, num_classes=1000,
-                 embed_dim=96, pos_dim=2, k=[64, 16, 4, 1], cluster_size=49, equal_size=False, pos_lambda=[0.0003, 0.0001, 0.00003], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
+                 embed_dim=96, pos_dim=2, k=[64, 16, 4, 1], cluster_size=49, max_cluster_size=0, equal_size=False, pos_lambda=[0.0003, 0.0001, 0.00003], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, downsample=PatchMerging,
@@ -540,6 +540,7 @@ class ClusterTransformer(nn.Module):
                                pos_dim=pos_dim,
                                k=k[i_layer],
                                cluster_size=cluster_size,
+                               max_cluster_size=max_cluster_size,
                                equal_size=equal_size,
                                pos_lambda=pos_lambda[i_layer],
                                depth=depths[i_layer],

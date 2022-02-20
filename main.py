@@ -75,11 +75,11 @@ def parse_option():
 
 
 def main(config):
+    '''
     dataset_val_len, data_loader_train, data_loader_val, mixup_fn = build_loader(config)
     '''
     _,_, data_loader_train, data_loader_val, mixup_fn = build_loader(config)
     dataset_val_len=10000
-    '''
 
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
     model = build_model(config)
@@ -168,9 +168,9 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     end = time.time()
     for idx, (samples, targets) in enumerate(data_loader):
         '''
+        '''
         samples = samples.cuda(non_blocking=True)
         targets = targets.cuda(non_blocking=True)
-        '''
         '''
         '''
         img_size = img_sizes[np.random.randint(3)]
@@ -263,9 +263,9 @@ def validate(config, data_loader, model):
     end = time.time()
     for idx, (images, target) in enumerate(data_loader):
         '''
+        '''
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
-        '''
         #images = F.interpolate(images, size=88, mode = 'bicubic')
 
         # compute output
