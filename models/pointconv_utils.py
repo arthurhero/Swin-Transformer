@@ -40,34 +40,83 @@ def points2img(pos,pixel,h,w):
     img.scatter_(src=pixel, index=idx, dim=2)
     return img.view(b,c,h,w)
 
-def gather_neighbor_img(pos, feature, h, w, radius):
+def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k, filter_invalid=False):
     '''
-    apply only to img point cloud
-    gather neighbor position and feature for input points
-    pos - b x 3 x n
-    feature - b x c x n
-    h,w - img height width
-    radius - neighborhood radius, scalar
+    cluster_pos - k' x m x d
+    cluster_feat - k' x m x c
+    cluster_mask - k' x m x 1
+    b - batch number
+    k - cluster number
     '''
-    b,c,n = feature.shape
-    sample_idx = pos[:,1]*w+pos[:,0] # b x 1 x n
-    img = points2img(pos,feature,h,w) # b x c x h x w
-    # create neighbor pos img, which is the same for all points
-    hs = torch.arange(0,2*radius-1).float()
-    ws = torch.arange(0,2*radius-1).float()
-    ys,xs = torch.meshgrid(hs,ws)
-    ys,xs = ys-(radius-1), xs-(radius-1) # adjust the center
-    pos_img = torch.cat([xs.unsqueeze(0),ys.unsqueeze(0)],dim=0).unsqueeze(0).expand(b,-1,-1,-1) # b x 2 x r x r
-    pos_img = pos_img.view(b,2,-1).unsqueeze(3).expand(-1,-1,-1,n) # b x 2 x (r*r) x n
+    _, m, c = cluster_feat.shape
+    d = cluster_pos.shape[2]
+    irregular = cluster_mask is None
+    if irregular:
+        new_pos = pos.new(b*k,m,d).zero_().long()
+        new_feat = feat.new(b*k,m,c).zero_()
+        new_mask = feat.new(b*k,m,1).zero_().long()
+        new_feat[valid_row_idx] = cluster_feat
+        new_pos[valid_row_idx] = cluster_pos
+        new_mask[valid_row_idx] = cluster_mask
+        new_mask = new_mask.reshape(b,k,m,1).permute(0,3,1,2).reshape(b,1,-1) # b x 1 x n
+    else:
+        new_feat = cluster_feat
+        new_pos = cluster_pos
+        new_mask = None
 
-    gather_feature = F.unfold(img, kernel_size=2*radius-1, padding=radius-1) # b x (c*r*r) x h x w
-    gather_feature = gather_feature.view(b, c, -1, h*w) # b x c x (r*r) x N
-    gather_feature = gather_feature.gather(dim=3, index = sample_idx.unsqueeze(1).expand(-1,c,gather_feature.shape[2],-1)) # b x c x (r*r) x n
+    new_feat = new_feat.reshape(b,k,m,c).permute(0,3,1,2).reshape(b,c,-1) # b x c x n
+    new_pos = new_pos.reshape(b,k,m,d).permute(0,3,1,2).reshape(b,d,-1) # b x d x n
 
-    # shrink the neighborhood size
-    sample_filter = (gather_feature[:,0:1] != 0).float() # b x 1 x (r*r) x n
-    
-    #UNFINISHEDDD!!!!!
+    if irregular and filter_invalid:
+        largest_n = new_mask.sum(2).max() # largest sample size
+        valid_idx = new_mask.view(-1).nonzero().squeeze() # z
+        batch_idx = torch.arange(b,device=valid_idx.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1)[valid_idx] # z
+
+        valid_feat = new_feat.permute(0,2,1).view(-1,c)[valid_idx] # z x c
+        valid_pos = new_pos.permute(0,2,1).view(-1,d)[valid_idx] # z x d
+        valid_mask = new_mask.permute(0,2,1).view(-1,1)[valid_idx] # z x 1
+        z = len(valid_idx)
+        rotate_idx = torch.arange(largest_n,device=valid_mask.device).long().repeat(torch.ceil(z/largest_n).long().item())[:z]
+        new_pos = pos.new(b,d,largest_n).zero_().long()
+        new_feat = feat.new(b,c,largest_n).zero_()
+        new_mask = feat.new(b,1,largest_n).zero_().long()
+        new_pos[batch_idx,:,rotate_idx] = valid_pos
+        new_feat[batch_idx,:,rotate_idx] = valid_feat
+        new_mask[batch_idx,:,rotate_idx] = valid_mask
+        if new_mask.min() == 1:
+            new_mask = None
+    return new_pos, new_feat, new_mask
+
+
+def points2cluster(pos, feat, member_id, cluster_mask):
+    '''
+    pos - b x d x n
+    feat - b x c x n
+    member_id - b x m x k
+    cluster_mask - b x m x k
+    '''
+    b,m,k = member_idx.shape
+    batch_tmp = torch.arange(b,device=feat.device).long().unsqueeze(1).expand(-1,m*k)
+    member_idx = member_idx.view(b,-1)
+    member_idx = (batch_tmp*n+member_idx).view(-1)
+    cluster_pos = pos.permute(0,2,1).reshape(-1,d)[member_idx].reshape(b,m,k,d).permute(0,2,1,3).reshape(-1,m,d)
+    cluster_feat = feat.permute(0,2,1).reshape(-1,c)[member_idx].reshape(b,m,k,c).permute(0,2,1,3).reshape(-1,m,c)
+    # get valid cluster id
+    irregular = cluster_mask.min() == 0
+    if irregular:
+        valid_row = (cluster_mask.sum(1) > 0).long() # b x k
+        valid_row_idx = valid_row.view(-1).nonzero().squeeze() # z
+        cluster_mask = cluster_mask.permute(0,2,1).reshape(-1,m).unsqueeze(2) # k' x m x 1
+        if len(valid_row_idx) < b*k:
+            cluster_pos = cluster_pos[valid_row_idx]
+            cluster_feat = cluster_feat[valid_row_idx]
+            cluster_mask = cluster_mask[valid_row_idx]
+        cluster_pos *= cluster_mask
+        cluster_feat *= cluster_mask
+    else:
+        cluster_mask = None
+    return cluster_pos, cluster_feat, cluster_mask, valid_row_idx
+
 
 
 def random_sampling(pc_pos, feature, num_samples):

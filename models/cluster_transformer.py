@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from .pointconv_utils import points2img, kmeans_keops
+from .pointconv_utils import points2img, kmeans_keops, cluster2points, points2cluster
 import torch_scatter
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
@@ -333,24 +333,7 @@ class BasicLayer(nn.Module):
             with torch.no_grad():
                 k=self.k
                 _, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random', equal_size=self.equal_size) # b x c x k, b x 1 x n, b x m x k, b x m x k
-            b,m,k = member_idx.shape
-            batch_tmp = torch.arange(b,device=feat.device).long().unsqueeze(1).expand(-1,m*k)
-            member_idx = member_idx.view(b,-1)
-            member_idx = (batch_tmp*n+member_idx).view(-1)
-            cluster_pos = pos.permute(0,2,1).reshape(-1,d)[member_idx].reshape(b,m,k,d).permute(0,2,1,3).reshape(-1,m,d)
-            cluster_feat = feat.permute(0,2,1).reshape(-1,c)[member_idx].reshape(b,m,k,c).permute(0,2,1,3).reshape(-1,m,c)
-            # get valid cluster id
-            irregular = cluster_mask.min() == 0
-            if irregular:
-                valid_row = (cluster_mask.sum(1) > 0).long() # b x k
-                valid_row_idx = valid_row.view(-1).nonzero().squeeze() # z
-                cluster_pos = cluster_pos[valid_row_idx]
-                cluster_feat = cluster_feat[valid_row_idx]
-                cluster_mask = cluster_mask.permute(0,2,1).reshape(-1,m)[valid_row_idx].unsqueeze(2) # k' x m x 1
-                cluster_pos *= cluster_mask
-                cluster_feat *= cluster_mask
-            else:
-                cluster_mask = None
+            cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(pos, feat, member_idx, cluster_mask)
         else:
             cluster_pos = pos.permute(0,2,1)
             cluster_feat = feat.permute(0,2,1)
@@ -366,50 +349,26 @@ class BasicLayer(nn.Module):
                 cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask)
             if self.k>1:
                 # re-calculate clusters
-                feat_means = cluster_feat.sum(dim=1) / cluster_mask.sum(dim=1) # k' x c
-                pos_means = cluster_pos.sum(dim=1) / cluster_mask.sum(dim=1) # k' x d
-                feat_means_full = feat.new(b*k,c).zero_() + float('nan')
-                pos_means_full = pos.new(b*k,d).zero_().long() + float('nan')
-                feat_means_full[valid_row_idx] = feat_means
-                pos_means_full[valid_row_idx] = pos_means
-                feat_means = feat_means_full.reshape(b,k,c)
-                pos_means = pos_means_full.reshape(b,k,d)
-             
-                if irregular:
-                    new_pos = pos.new(b*k,m,d).zero_().long()
-                    new_feat = feat.new(b*k,m,c).zero_()
-                    new_mask = feat.new(b*k,m,1).zero_().long()
-                    new_feat[valid_row_idx] = cluster_feat
-                    new_pos[valid_row_idx] = cluster_pos
-                    new_mask[valid_row_idx] = cluster_mask
-                    new_mask = new_mask.reshape(b,k,m,1).permute(0,3,1,2).reshape(b,1,-1) # b x 1 x n
+                if cluster_mask is not None:
+                    cluster_count = cluster_mask.sum(dim=1)
+                    feat_means = cluster_feat.sum(dim=1) / cluster_count # k' x c
+                    pos_means = cluster_pos.sum(dim=1) / cluster_count # k' x d
+                    if len(valid_row_idx) < b*k:
+                        feat_means_full = feat.new(b*k,c).zero_() + float('nan')
+                        pos_means_full = pos.new(b*k,d).zero_().long() + float('nan')
+                        feat_means_full[valid_row_idx] = feat_means
+                        pos_means_full[valid_row_idx] = pos_means
+                        feat_means = feat_means_full
+                        pos_means = pos_means_full
+                    feat_means = feat_means.reshape(b,k,c)
+                    pos_means = pos_means.reshape(b,k,d)
                 else:
-                    new_feat = cluster_feat
-                    new_pos = cluster_pos
-                    new_mask = None
-                new_feat = new_feat.reshape(b,k,m,c).permute(0,3,1,2).reshape(b,c,-1) # b x c x n
-                new_pos = new_pos.reshape(b,k,m,d).permute(0,3,1,2).reshape(b,d,-1) # b x d x n
-          
+                    feat_means = feat_means.mean(dim=1).reshape(b,k,c)
+                    pos_means = pos_means.mean(dim=1).reshape(b,k,d)
+                new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k, filter_invalid=False)
                 with torch.no_grad():
                     _, _, member_idx, cluster_mask = kmeans_keops(new_feat, self.k, max_cluster_size=self.max_cluster_size, num_nearest_mean=1, num_iter=1, pos=new_pos, pos_lambda=self.pos_lambda, valid_mask=new_mask, init_feat_means = feat_means, init_pos_means = pos_means, equal_size=self.equal_size) # b x c x k, b x 1 x n, b x m x k, b x m x k
-                b,m,k = member_idx.shape
-                batch_tmp = torch.arange(b,device=feat.device).long().unsqueeze(1).expand(-1,m*k)
-                member_idx = member_idx.view(b,-1)
-                member_idx = (batch_tmp*n+member_idx).view(-1)
-                cluster_pos = pos.permute(0,2,1).reshape(-1,d)[member_idx].reshape(b,m,k,d).permute(0,2,1,3).reshape(-1,m,d)
-                cluster_feat = feat.permute(0,2,1).reshape(-1,c)[member_idx].reshape(b,m,k,c).permute(0,2,1,3).reshape(-1,m,c)
-                # get valid cluster id
-                irregular = cluster_mask.min() == 0
-                if irregular:
-                    valid_row = (cluster_mask.sum(1) > 0).long() # b x k
-                    valid_row_idx = valid_row.view(-1).nonzero().squeeze() # z
-                    cluster_pos = cluster_pos[valid_row_idx]
-                    cluster_feat = cluster_feat[valid_row_idx]
-                    cluster_mask = cluster_mask.permute(0,2,1).reshape(-1,m)[valid_row_idx].unsqueeze(2) # k' x m x 1
-                    cluster_pos *= cluster_mask
-                    cluster_feat *= cluster_mask
-                else:
-                    cluster_mask = None
+                cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(new_pos, new_feat, member_idx, cluster_mask)
 
         if self.k==1:
             new_pos = cluster_pos.permute(0,2,1)
@@ -419,47 +378,7 @@ class BasicLayer(nn.Module):
             return new_pos, new_feat, mask
 
         # convert back to batches
-        if irregular:
-            new_pos = pos.new(b*k,m,d).zero_().long()
-            new_feat = feat.new(b*k,m,c).zero_()
-            new_mask = feat.new(b*k,m,1).zero_().long()
-            new_feat[valid_row_idx] = cluster_feat
-            new_pos[valid_row_idx] = cluster_pos
-            new_mask[valid_row_idx] = cluster_mask
-            new_mask = new_mask.reshape(b,k,m,1).permute(0,3,1,2).reshape(b,1,-1) # b x 1 x n
-        else:
-            new_feat = cluster_feat
-            new_pos = cluster_pos
-            new_mask = None
-
-        new_feat = new_feat.reshape(b,k,m,c).permute(0,3,1,2).reshape(b,c,-1) # b x c x n
-        new_pos = new_pos.reshape(b,k,m,d).permute(0,3,1,2).reshape(b,d,-1) # b x d x n
-
-        # filter out valid points
-        if irregular:
-            largest_n = new_mask.sum(2).max() # largest sample size
-            valid_idx = new_mask.view(-1).nonzero().squeeze() # z
-            batch_idx = torch.arange(b,device=valid_idx.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1)[valid_idx] # z
-         
-            valid_feat = new_feat.permute(0,2,1).view(-1,c)[valid_idx] # z x c
-            valid_pos = new_pos.permute(0,2,1).view(-1,d)[valid_idx] # z x d
-            valid_mask = new_mask.permute(0,2,1).view(-1,1)[valid_idx] # z x 1
-            z = len(valid_idx)
-            '''
-            if mask is None:
-                assert z==b*n, "there should not be missing points after kmeans"
-                '''
-            rotate_idx = torch.arange(largest_n,device=valid_mask.device).long().repeat(torch.ceil(z/largest_n).long().item())[:z]
-            new_pos = pos.new(b,d,largest_n).zero_().long()
-            new_feat = feat.new(b,c,largest_n).zero_()
-            new_mask = feat.new(b,1,largest_n).zero_().long()
-            new_pos[batch_idx,:,rotate_idx] = valid_pos
-            new_feat[batch_idx,:,rotate_idx] = valid_feat
-            new_mask[batch_idx,:,rotate_idx] = valid_mask
-            '''
-            '''
-            if new_mask.min() == 1:
-                new_mask = None
+        new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k, filter_invalid=True)
 
         if self.downsample is not None:
             new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
