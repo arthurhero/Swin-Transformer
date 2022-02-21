@@ -9,3 +9,8 @@ conda install -c conda-forge opencv
 pip install numba
 pip install cupy-cuda113
 pip install ffcv
+pip install timm
+pip install PyYAML
+pip install yacs
+conda install pytorch-scatter -c pyg
+pip install termcolor

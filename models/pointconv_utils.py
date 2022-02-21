@@ -310,7 +310,7 @@ def init_kmeanspp(points, k):
         centers = torch.cat([centers, new_center], dim=1)
     return centers
 
-def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None, init='random', equal_size=False):
+def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None, init='random', init_feat_means=None, init_pos_means=None, equal_size=False):
     '''
     points - b x c x n
     k - number of means
@@ -318,6 +318,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     pos_lambda - lambda of pos in dist calculation
     valid_mask - b x 1 x n, binary mask indicating the valid points
     init - method of initialization, kmeans++ or random
+    init_feat_means - initialize using these means, b x k x c 
     max_cluster_size - do random sampling in larger clusters; must be >= n/k
                  only affects reverse_assignment and valid_assignment_mask
     equal_size - bool, clusters to have equal size, ceil(n/k)
@@ -357,7 +358,13 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         pos_std = pos.view(-1).std(dim=0, unbiased=True)
         points = (points-feat_mean) / feat_std
         pos = (pos-pos_mean) / pos_std
-    if init=='random':
+    if init_feat_means is not None:
+        means = init_feat_means.detach().to(points.dtype) # b x k x c
+        means = (means - feat_mean) / feat_std 
+        if init_pos_means is not None:
+            means_pos = init_pos_means.detach().to(points.dtype)
+            means_pos = (means_pos - pos_mean) / pos_std 
+    elif init=='random':
         rand_idx = torch.randperm(n)[:k]
         means = points[:,rand_idx,:].clone().contiguous() # b x k x c
         if pos is not None:
