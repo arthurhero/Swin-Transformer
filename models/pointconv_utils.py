@@ -50,22 +50,23 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
     '''
     _, m, c = cluster_feat.shape
     d = cluster_pos.shape[2]
-    irregular = cluster_mask is None
-    if irregular:
-        new_pos = pos.new(b*k,m,d).zero_().long()
-        new_feat = feat.new(b*k,m,c).zero_()
-        new_mask = feat.new(b*k,m,1).zero_().long()
+    irregular = cluster_mask is not None
+    if valid_row_idx is not None:
+        new_pos = cluster_pos.new(b*k,m,d).zero_().long()
+        new_feat = cluster_feat.new(b*k,m,c).zero_()
+        new_mask = cluster_feat.new(b*k,m,1).zero_().long()
         new_feat[valid_row_idx] = cluster_feat
         new_pos[valid_row_idx] = cluster_pos
         new_mask[valid_row_idx] = cluster_mask
-        new_mask = new_mask.reshape(b,k,m,1).permute(0,3,1,2).reshape(b,1,-1) # b x 1 x n
     else:
         new_feat = cluster_feat
         new_pos = cluster_pos
-        new_mask = None
+        new_mask = cluster_mask 
 
     new_feat = new_feat.reshape(b,k,m,c).permute(0,3,1,2).reshape(b,c,-1) # b x c x n
     new_pos = new_pos.reshape(b,k,m,d).permute(0,3,1,2).reshape(b,d,-1) # b x d x n
+    if new_mask is not None:
+        new_mask = new_mask.reshape(b,k,m,1).permute(0,3,1,2).reshape(b,1,-1) # b x 1 x n
 
     if irregular and filter_invalid:
         largest_n = new_mask.sum(2).max() # largest sample size
@@ -77,9 +78,9 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
         valid_mask = new_mask.permute(0,2,1).view(-1,1)[valid_idx] # z x 1
         z = len(valid_idx)
         rotate_idx = torch.arange(largest_n,device=valid_mask.device).long().repeat(torch.ceil(z/largest_n).long().item())[:z]
-        new_pos = pos.new(b,d,largest_n).zero_().long()
-        new_feat = feat.new(b,c,largest_n).zero_()
-        new_mask = feat.new(b,1,largest_n).zero_().long()
+        new_pos = cluster_pos.new(b,d,largest_n).zero_().long()
+        new_feat = cluster_feat.new(b,c,largest_n).zero_()
+        new_mask = cluster_feat.new(b,1,largest_n).zero_().long()
         new_pos[batch_idx,:,rotate_idx] = valid_pos
         new_feat[batch_idx,:,rotate_idx] = valid_feat
         new_mask[batch_idx,:,rotate_idx] = valid_mask
@@ -87,27 +88,30 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
             new_mask = None
     return new_pos, new_feat, new_mask
 
-
-def points2cluster(pos, feat, member_id, cluster_mask):
+def points2cluster(pos, feat, member_idx, cluster_mask):
     '''
     pos - b x d x n
     feat - b x c x n
-    member_id - b x m x k
+    member_idx - b x m x k
     cluster_mask - b x m x k
     '''
     b,m,k = member_idx.shape
+    _,c,n = feat.shape
+    d = pos.shape[1]
     batch_tmp = torch.arange(b,device=feat.device).long().unsqueeze(1).expand(-1,m*k)
     member_idx = member_idx.view(b,-1)
     member_idx = (batch_tmp*n+member_idx).view(-1)
     cluster_pos = pos.permute(0,2,1).reshape(-1,d)[member_idx].reshape(b,m,k,d).permute(0,2,1,3).reshape(-1,m,d)
     cluster_feat = feat.permute(0,2,1).reshape(-1,c)[member_idx].reshape(b,m,k,c).permute(0,2,1,3).reshape(-1,m,c)
     # get valid cluster id
-    irregular = cluster_mask.min() == 0
+    irregular = cluster_mask is not None and cluster_mask.min() == 0
     if irregular:
         valid_row = (cluster_mask.sum(1) > 0).long() # b x k
         valid_row_idx = valid_row.view(-1).nonzero().squeeze() # z
         cluster_mask = cluster_mask.permute(0,2,1).reshape(-1,m).unsqueeze(2) # k' x m x 1
-        if len(valid_row_idx) < b*k:
+        if len(valid_row_idx) == b*k:
+            valid_row_idx = None
+        else:
             cluster_pos = cluster_pos[valid_row_idx]
             cluster_feat = cluster_feat[valid_row_idx]
             cluster_mask = cluster_mask[valid_row_idx]
@@ -115,9 +119,8 @@ def points2cluster(pos, feat, member_id, cluster_mask):
         cluster_feat *= cluster_mask
     else:
         cluster_mask = None
+        valid_row_idx = None
     return cluster_pos, cluster_feat, cluster_mask, valid_row_idx
-
-
 
 def random_sampling(pc_pos, feature, num_samples):
     '''
@@ -318,7 +321,7 @@ def epsilon_ball(query, databse, radius, k, return_dist = False):
         return nn_idx, nn_dist, mask
     return nn_idx, mask
 
-def batched_bincount(mat, valid_mask=None):
+def batched_bincount(mat, valid_mask=None, k=None):
     '''
     batched version of torch.bincount
     mat - b x n, non-negative ints
@@ -326,7 +329,8 @@ def batched_bincount(mat, valid_mask=None):
     return counts - b x k
     '''
     b,n = mat.shape
-    k = mat.max().item() + 1
+    if k is None:
+        k = mat.max().item() + 1
     result = torch.zeros(b,k,device = mat.device).long()
     ones = torch.ones(mat.shape,device = mat.device).long()
     if valid_mask is not None:
@@ -378,6 +382,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     reverse_assignment - b x m x k, m is the largest cluster size, invalid position filled with 0
     valid_assignment_mask - b x m x k, if sum along m gets 0, then the cluster is invalid
     '''
+    max_cluster_size=25
     points = points.detach()
     if pos is not None:
         pos = pos.detach()
@@ -434,7 +439,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         pos_ = LazyTensor(pos[:,:,None,:]) # b x n x 1 x d
         means_pos_ = LazyTensor(means_pos[:,None,:,:]) # b x 1 x k x d
 
-    if init=='random' and valid_mask is not None:
+    if init=='random' and init_feat_means is None and valid_mask is not None:
         # turn excessive invalid means to nan
         means_valid_mask = valid_mask[:,0,rand_idx].unsqueeze(2) # b x k x 1
         row_sum = means_valid_mask.sum(1)[:,0] # b, check if all are invalid
@@ -456,12 +461,11 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
         max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
         #print("iter, max bin size", i, max_bin_size)
-        #print("mean assign", i, mean_assignment[0,:10,0])
 
         # re-compute the means
         means.zero_() # content of lazytensor will change with the original tensor
         means.scatter_add_(dim=1, index=mean_assignment.expand(-1,-1,c), src=points) # invalid points will contribute 0
-        bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask) # b x k
+        bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask, k) # b x k
         means /= bin_size.unsqueeze(2)
         if pos is not None:
             means_pos.zero_()

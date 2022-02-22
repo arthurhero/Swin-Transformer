@@ -333,6 +333,7 @@ class BasicLayer(nn.Module):
             with torch.no_grad():
                 k=self.k
                 _, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random', equal_size=self.equal_size) # b x c x k, b x 1 x n, b x m x k, b x m x k
+                #print("keep ratio", cluster_mask.sum() / (b*n))
             cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(pos, feat, member_idx, cluster_mask)
         else:
             cluster_pos = pos.permute(0,2,1)
@@ -347,15 +348,16 @@ class BasicLayer(nn.Module):
                 cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask)
             else:
                 cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask)
+            '''    
             if self.k>1:
                 # re-calculate clusters
                 if cluster_mask is not None:
                     cluster_count = cluster_mask.sum(dim=1)
                     feat_means = cluster_feat.sum(dim=1) / cluster_count # k' x c
                     pos_means = cluster_pos.sum(dim=1) / cluster_count # k' x d
-                    if len(valid_row_idx) < b*k:
-                        feat_means_full = feat.new(b*k,c).zero_() + float('nan')
-                        pos_means_full = pos.new(b*k,d).zero_().long() + float('nan')
+                    if valid_row_idx is not None and len(valid_row_idx) < b*k:
+                        feat_means_full = torch.zeros(b*k,c,dtype=feat_means.dtype,device=feat_means.device)
+                        pos_means_full = torch.zeros(b*k,d,dtype=pos_means.dtype,device=pos_means.device)
                         feat_means_full[valid_row_idx] = feat_means
                         pos_means_full[valid_row_idx] = pos_means
                         feat_means = feat_means_full
@@ -363,12 +365,14 @@ class BasicLayer(nn.Module):
                     feat_means = feat_means.reshape(b,k,c)
                     pos_means = pos_means.reshape(b,k,d)
                 else:
-                    feat_means = feat_means.mean(dim=1).reshape(b,k,c)
-                    pos_means = pos_means.mean(dim=1).reshape(b,k,d)
+                    feat_means = cluster_feat.mean(dim=1).reshape(b,k,c)
+                    pos_means = cluster_pos.float().mean(dim=1).reshape(b,k,d)
                 new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k, filter_invalid=False)
                 with torch.no_grad():
                     _, _, member_idx, cluster_mask = kmeans_keops(new_feat, self.k, max_cluster_size=self.max_cluster_size, num_nearest_mean=1, num_iter=1, pos=new_pos, pos_lambda=self.pos_lambda, valid_mask=new_mask, init_feat_means = feat_means, init_pos_means = pos_means, equal_size=self.equal_size) # b x c x k, b x 1 x n, b x m x k, b x m x k
                 cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(new_pos, new_feat, member_idx, cluster_mask)
+                del feat_means, pos_means, new_pos, new_feat, new_mask
+            '''
 
         if self.k==1:
             new_pos = cluster_pos.permute(0,2,1)
@@ -379,13 +383,14 @@ class BasicLayer(nn.Module):
 
         # convert back to batches
         new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k, filter_invalid=True)
+        '''
+        if new_mask is not None:
+            print('min kept point ratio before ds',new_mask.sum(-1).min() / n)
+            print('avg kept point ratio before ds',new_mask.sum() / (b*n))
+            '''
 
         if self.downsample is not None:
             new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
-        '''
-        print('min kept point ratio',new_mask.sum(-1).min() / n)
-        print('avg kept point ratio',new_mask.sum() / (b*n))
-        '''
         return new_pos, new_feat, new_mask
 
     def extra_repr(self) -> str:
