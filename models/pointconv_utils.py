@@ -384,6 +384,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     '''
     max_cluster_size=25
     points = points.detach()
+    #print("points",points[0,:,:10])
     if pos is not None:
         pos = pos.detach()
     old_dtype = points.dtype
