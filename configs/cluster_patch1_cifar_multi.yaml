@@ -12,7 +12,7 @@ MODEL:
     K: [0,0,0]
     CLUSTER_SIZE: 16
     MAX_CLUSTER_SIZE: 0
-    POS_LAMBDA: [100.0,100.0,100.0]
+    POS_LAMBDA: [100.0,30.0,10.0]
     EQUAL_SIZE: False
 DATA:
   DATASET: cifar
