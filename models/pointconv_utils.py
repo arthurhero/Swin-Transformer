@@ -382,7 +382,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     reverse_assignment - b x m x k, m is the largest cluster size, invalid position filled with 0
     valid_assignment_mask - b x m x k, if sum along m gets 0, then the cluster is invalid
     '''
-    max_cluster_size=25
+    #max_cluster_size=25
     points = points.detach()
     #print("points",points[0,:,:10])
     if pos is not None:
