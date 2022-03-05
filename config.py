@@ -87,9 +87,8 @@ _C.MODEL.CLUSTER.K = [0,0,0,0]
 # priority of cluster size is large than k
 _C.MODEL.CLUSTER.CLUSTER_SIZE = 16
 _C.MODEL.CLUSTER.MAX_CLUSTER_SIZE = 0
-_C.MODEL.CLUSTER.POS_LAMBDA = [100.0,100.0,100.0,0]
+_C.MODEL.CLUSTER.POS_LAMBDA = [100.0,30.0,10.0]
 _C.MODEL.CLUSTER.POS_MLP_BIAS = True
-_C.MODEL.CLUSTER.EQUAL_SIZE = False
 
 # -----------------------------------------------------------------------------
 # Training settings

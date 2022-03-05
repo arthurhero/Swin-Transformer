@@ -71,7 +71,6 @@ def build_model(config):
                                 k=config.MODEL.CLUSTER.K,
                                 cluster_size=config.MODEL.CLUSTER.CLUSTER_SIZE,
                                 max_cluster_size=config.MODEL.CLUSTER.MAX_CLUSTER_SIZE,
-                                equal_size=config.MODEL.CLUSTER.EQUAL_SIZE,
                                 pos_lambda=config.MODEL.CLUSTER.POS_LAMBDA,
                                 depths=config.MODEL.SWIN.DEPTHS,
                                 num_heads=config.MODEL.SWIN.NUM_HEADS,

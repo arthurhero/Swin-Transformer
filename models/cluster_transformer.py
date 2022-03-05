@@ -165,8 +165,8 @@ class ClusterTransformerBlock(nn.Module):
         assert c == self.dim, "dim does not accord to input"
         assert d == self.pos_dim, "pos dim does not accord to input"
 
-        shortcut = feat
         x = self.norm1(feat)
+        shortcut = x 
 
         # cluster attention 
         x = self.attn(pos, x, mask)  # k x m x c
@@ -286,7 +286,7 @@ class BasicLayer(nn.Module):
         use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
     """
 
-    def __init__(self, dim, k, cluster_size, max_cluster_size, equal_size, depth, num_heads, pos_lambda=0.0003, pos_dim=2, 
+    def __init__(self, dim, k, cluster_size, max_cluster_size, depth, num_heads, pos_lambda=0.0003, pos_dim=2, 
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False):
 
@@ -299,7 +299,6 @@ class BasicLayer(nn.Module):
         self.pos_dim = pos_dim
         self.depth = depth
         self.use_checkpoint = use_checkpoint
-        self.equal_size=equal_size
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -332,7 +331,7 @@ class BasicLayer(nn.Module):
             # perform k-means
             with torch.no_grad():
                 k=self.k
-                _, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random', equal_size=self.equal_size) # b x c x k, b x 1 x n, b x m x k, b x m x k
+                _, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random') # b x c x k, b x 1 x n, b x m x k, b x m x k
                 #print("keep ratio", cluster_mask.sum() / (b*n))
             cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(pos, feat, member_idx, cluster_mask)
         else:
@@ -369,7 +368,7 @@ class BasicLayer(nn.Module):
                     pos_means = cluster_pos.float().mean(dim=1).reshape(b,k,d)
                 new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k, filter_invalid=False)
                 with torch.no_grad():
-                    _, _, member_idx, cluster_mask = kmeans_keops(new_feat, self.k, max_cluster_size=self.max_cluster_size, num_nearest_mean=1, num_iter=1, pos=new_pos, pos_lambda=self.pos_lambda, valid_mask=new_mask, init_feat_means = feat_means, init_pos_means = pos_means, equal_size=self.equal_size) # b x c x k, b x 1 x n, b x m x k, b x m x k
+                    _, _, member_idx, cluster_mask = kmeans_keops(new_feat, self.k, max_cluster_size=self.max_cluster_size, num_nearest_mean=1, num_iter=1, pos=new_pos, pos_lambda=self.pos_lambda, valid_mask=new_mask, init_feat_means = feat_means, init_pos_means = pos_means) # b x c x k, b x 1 x n, b x m x k, b x m x k
                 cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(new_pos, new_feat, member_idx, cluster_mask)
                 del feat_means, pos_means, new_pos, new_feat, new_mask
             '''
@@ -382,7 +381,7 @@ class BasicLayer(nn.Module):
             return new_pos, new_feat, mask
 
         # convert back to batches
-        new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k, filter_invalid=True)
+        new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k, filter_invalid=True)
         '''
         if new_mask is not None:
             print('min kept point ratio before ds',new_mask.sum(-1).min() / n)
@@ -477,7 +476,7 @@ class ClusterTransformer(nn.Module):
     """
 
     def __init__(self, patch_size=4, in_chans=3, num_classes=1000,
-                 embed_dim=96, pos_dim=2, k=[64, 16, 4, 1], cluster_size=49, max_cluster_size=0, equal_size=False, pos_lambda=[0.0003, 0.0001, 0.00003], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
+                 embed_dim=96, pos_dim=2, k=[64, 16, 4, 1], cluster_size=49, max_cluster_size=0, pos_lambda=[0.0003, 0.0001, 0.00003], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, downsample=PatchMerging,
@@ -511,7 +510,6 @@ class ClusterTransformer(nn.Module):
                                k=k[i_layer],
                                cluster_size=cluster_size,
                                max_cluster_size=max_cluster_size,
-                               equal_size=equal_size,
                                pos_lambda=pos_lambda[i_layer],
                                depth=depths[i_layer],
                                num_heads=num_heads[i_layer],

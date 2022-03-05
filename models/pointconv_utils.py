@@ -44,7 +44,8 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
     '''
     cluster_pos - k' x m x d
     cluster_feat - k' x m x c
-    cluster_mask - k' x m x 1
+    cluster_mask - k' x m x 1, can be None
+    valid_row_idx - can be None
     b - batch number
     k - cluster number
     '''
@@ -52,9 +53,10 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
     d = cluster_pos.shape[2]
     irregular = cluster_mask is not None
     if valid_row_idx is not None:
+        assert irregular, "cluster mask must not be None"
         new_pos = cluster_pos.new(b*k,m,d).zero_().long()
         new_feat = cluster_feat.new(b*k,m,c).zero_()
-        new_mask = cluster_feat.new(b*k,m,1).zero_().long()
+        new_mask = cluster_mask.new(b*k,m,1).zero_().long()
         new_feat[valid_row_idx] = cluster_feat
         new_pos[valid_row_idx] = cluster_pos
         new_mask[valid_row_idx] = cluster_mask
@@ -65,7 +67,7 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
 
     new_feat = new_feat.reshape(b,k,m,c).permute(0,3,1,2).reshape(b,c,-1) # b x c x n
     new_pos = new_pos.reshape(b,k,m,d).permute(0,3,1,2).reshape(b,d,-1) # b x d x n
-    if new_mask is not None:
+    if irregular:
         new_mask = new_mask.reshape(b,k,m,1).permute(0,3,1,2).reshape(b,1,-1) # b x 1 x n
 
     if irregular and filter_invalid:
@@ -325,7 +327,7 @@ def batched_bincount(mat, valid_mask=None, k=None):
     '''
     batched version of torch.bincount
     mat - b x n, non-negative ints
-    valid_mask - b x 1 x n, binary mask for valid points
+    valid_mask - b x n, binary mask for valid points
     return counts - b x k
     '''
     b,n = mat.shape
@@ -334,7 +336,7 @@ def batched_bincount(mat, valid_mask=None, k=None):
     result = torch.zeros(b,k,device = mat.device).long()
     ones = torch.ones(mat.shape,device = mat.device).long()
     if valid_mask is not None:
-        ones *= valid_mask.squeeze(1)
+        ones *= valid_mask
     result.scatter_add_(dim=1, index=mat, src=ones) # b x k
     return result
 
@@ -363,7 +365,7 @@ def init_kmeanspp(points, k):
         centers = torch.cat([centers, new_center], dim=1)
     return centers
 
-def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None, init='random', init_feat_means=None, init_pos_means=None, equal_size=False):
+def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None, init='random', init_feat_means=None, init_pos_means=None, normalize=True):
     '''
     points - b x c x n
     k - number of means
@@ -374,8 +376,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     init_feat_means - initialize using these means, b x k x c 
     max_cluster_size - do random sampling in larger clusters; must be >= n/k
                  only affects reverse_assignment and valid_assignment_mask
-    equal_size - bool, clusters to have equal size, ceil(n/k)
-                 only affects reverse_assignment and valid_assignment_mask
+    normalize - whether to normalize points to mean 0 std 1
     return
     means - b x c x k
     mean_assignment - b x num_nearest_mean x n
@@ -384,7 +385,6 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     '''
     #max_cluster_size=25
     points = points.detach()
-    #print("points",points[0,:,:10])
     if pos is not None:
         pos = pos.detach()
     old_dtype = points.dtype
@@ -394,6 +394,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         points *= valid_mask
         if pos is not None:
             pos *= valid_mask # make sure invalid pos and points are all 0
+        valid_mask = valid_mask.squeeze(1) # b x n
         num_valid = valid_mask.sum() # total number of valid points
     from pykeops.torch import LazyTensor
     points = points.permute(0,2,1).contiguous() # b x n x c
@@ -405,32 +406,28 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         pos = pos.to(points.dtype)
         pos = pos.permute(0,2,1).contiguous() # b x n x d
         # normalize mean and std
-        '''
-        '''
+    if normalize:
         feat_mean = points.mean()
-        feat_std = points.view(-1).std(dim=0, unbiased=True)
-        pos_mean = pos.mean()
-        pos_std = pos.view(-1).std(dim=0, unbiased=True)
+        feat_std = (points.view(-1).var(dim=0, unbiased=False)+1e-5).pow(0.5)
         points = (points-feat_mean) / feat_std
-        pos = (pos-pos_mean) / pos_std
+        if pos is not None:
+            pos_mean = pos.mean()
+            pos_std = (pos.view(-1).var(dim=0, unbiased=False)+1e-5).pow(0.5)
+            pos = (pos-pos_mean) / pos_std
     if init_feat_means is not None:
         means = init_feat_means.detach().to(points.dtype) # b x k x c
-        means = (means - feat_mean) / feat_std 
+        if normalize:
+            means = (means - feat_mean) / feat_std 
         if init_pos_means is not None:
             means_pos = init_pos_means.detach().to(points.dtype)
-            means_pos = (means_pos - pos_mean) / pos_std 
+            if normalize:
+                means_pos = (means_pos - pos_mean) / pos_std 
     elif init=='random':
         rand_idx = torch.randperm(n)[:k]
         means = points[:,rand_idx,:].clone().contiguous() # b x k x c
         if pos is not None:
             means_pos = pos[:,rand_idx,:].clone().contiguous() # b x k x d
-            '''
-            ys,xs = torch.meshgrid(torch.arange(int(k**0.5)), torch.arange(int(k**0.5)))
-            pi = (ys*int((n//k)**0.5)+int((n//k)**0.5)//2)*int(n**0.5) + xs*int((n//k)**0.5)+int((n//k)**0.5)//2
-            means_pos = pos[:,pi.view(-1),:].clone().contiguous()-0.5/pos_std # b x k x d
-            print('mean pos', means_pos[0,:10])
-            '''
-    elif init=='kmeans++':
+    elif init=='kmeans++': # only can run on a single gpu
         means = init_kmeanspp(points, k) # b x k x c
         if pos is not None:
             means_pos = init_kmeanspp(pos, k) # b x k x d
@@ -442,7 +439,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
 
     if init=='random' and init_feat_means is None and valid_mask is not None:
         # turn excessive invalid means to nan
-        means_valid_mask = valid_mask[:,0,rand_idx].unsqueeze(2) # b x k x 1
+        means_valid_mask = valid_mask[:,rand_idx].unsqueeze(2) # b x k x 1
         row_sum = means_valid_mask.sum(1)[:,0] # b, check if all are invalid
         all_zero_index = (row_sum==0).long().nonzero().squeeze()
         means_valid_mask[all_zero_index, 0] = 1
@@ -458,10 +455,8 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         dist = ((points_ - means_) ** 2).sum(-1) # b x n x k
         if pos is not None:
             dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
-            dist = dist / c + (pos_lambda / d) * dist_pos
+            dist = dist + (pos_lambda / d * c) * dist_pos
         mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
-        max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
-        #print("iter, max bin size", i, max_bin_size)
 
         # re-compute the means
         means.zero_() # content of lazytensor will change with the original tensor
@@ -476,27 +471,18 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     dist = ((points_ - means_) ** 2).sum(-1)
     if pos is not None:
         dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
-        dist = dist / c + (pos_lambda / d) * dist_pos
+        dist = dist + (pos_lambda / d * c) * dist_pos
     mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
 
     max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
     #print("max bin size",max_bin_size, "avg size", n//k)
     if max_cluster_size is not None:
         max_bin_size = min(max_cluster_size, max_bin_size)
-    if equal_size:
-        max_bin_size = int(math.ceil(n/k))
     # get reverse_assignment
     sorted_assignment, sorted_point_idx = mean_assignment.squeeze(2).sort(dim=-1, descending=False) # b x n, b x n
     if valid_mask is not None:
-        sorted_valid_mask = valid_mask.squeeze(1).gather(index=sorted_point_idx,dim=-1) # b x n
-        if equal_size:
-            # rank the valid points first
-            sorted_valid_mask, vf_idx = sorted_valid_mask.sort(dim=-1,descending=True,stable=True)
-            sorted_point_idx = sorted_point_idx.gather(index=vf_idx,dim=-1)
+        sorted_valid_mask = valid_mask.gather(index=sorted_point_idx,dim=-1) # b x n
         sorted_valid_mask = sorted_valid_mask.reshape(-1)
-    if equal_size:
-        sorted_assignment = torch.arange(end=k,device=mean_assignment.device).long().repeat_interleave(max_bin_size)[:n]
-        sorted_assignment = sorted_assignment.unsqueeze(0).expand(b,-1)
     sorted_assignment = sorted_assignment.reshape(-1)
     sorted_point_idx = sorted_point_idx.reshape(-1)
     if valid_mask is not None:
