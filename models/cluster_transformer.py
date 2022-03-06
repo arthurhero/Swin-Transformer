@@ -165,8 +165,8 @@ class ClusterTransformerBlock(nn.Module):
         assert c == self.dim, "dim does not accord to input"
         assert d == self.pos_dim, "pos dim does not accord to input"
 
+        shortcut = feat 
         x = self.norm1(feat)
-        shortcut = x 
 
         # cluster attention 
         x = self.attn(pos, x, mask)  # k x m x c

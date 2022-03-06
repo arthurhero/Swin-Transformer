@@ -90,7 +90,7 @@ def build_imagenet_loader(config):
         'label': label_pipeline
     }
 
-    data_loader_train = Loader(os.path.join(config.DATA.DATA_PATH,'imagenet_train.beton'), batch_size=config.DATA.BATCH_SIZE, num_workers=config.DATA.NUM_WORKERS,
+    data_loader_train = Loader(os.path.join(config.DATA.DATA_PATH,'imagenet_train.beton'), batch_size=config.DATA.BATCH_SIZE // num_tasks, num_workers=config.DATA.NUM_WORKERS,
             order=OrderOption.RANDOM if dist.get_world_size()>1 else OrderOption.QUASI_RANDOM, 
             pipelines=train_pipelines, drop_last=True, distributed=dist.get_world_size()>1, os_cache=True) 
 
@@ -104,7 +104,7 @@ def build_imagenet_loader(config):
     }
 
     indices = np.arange(dist.get_rank(), 50000, dist.get_world_size())
-    data_loader_val = Loader(os.path.join(config.DATA.DATA_PATH,'imagenet_test.beton'), batch_size=config.DATA.BATCH_SIZE, num_workers=config.DATA.NUM_WORKERS,
+    data_loader_val = Loader(os.path.join(config.DATA.DATA_PATH,'imagenet_test.beton'), batch_size=config.DATA.BATCH_SIZE // num_tasks, num_workers=config.DATA.NUM_WORKERS,
                     order=OrderOption.SEQUENTIAL, pipelines=val_pipelines, drop_last=False, indices=indices)
 
     # setup mixup / cutmix
@@ -175,7 +175,7 @@ def build_cifar_loader(config):
         'label': label_pipeline
     }
 
-    data_loader_train = Loader(os.path.join(config.DATA.DATA_PATH,'cifar_train.beton'), batch_size=config.DATA.BATCH_SIZE, num_workers=config.DATA.NUM_WORKERS,
+    data_loader_train = Loader(os.path.join(config.DATA.DATA_PATH,'cifar_train.beton'), batch_size=config.DATA.BATCH_SIZE // num_tasks, num_workers=config.DATA.NUM_WORKERS,
             order=OrderOption.RANDOM if dist.get_world_size()>1 else OrderOption.QUASI_RANDOM,
             pipelines=train_pipelines, drop_last=True, distributed=dist.get_world_size()>1, os_cache=True)
 
@@ -189,7 +189,7 @@ def build_cifar_loader(config):
     }
 
     indices = np.arange(dist.get_rank(), 10000, dist.get_world_size())
-    data_loader_val = Loader(os.path.join(config.DATA.DATA_PATH,'cifar_test.beton'), batch_size=config.DATA.BATCH_SIZE, num_workers=config.DATA.NUM_WORKERS,
+    data_loader_val = Loader(os.path.join(config.DATA.DATA_PATH,'cifar_test.beton'), batch_size=config.DATA.BATCH_SIZE // num_tasks, num_workers=config.DATA.NUM_WORKERS,
                     order=OrderOption.SEQUENTIAL, pipelines=val_pipelines, drop_last=False, indices=indices)
 
     # setup mixup / cutmix
