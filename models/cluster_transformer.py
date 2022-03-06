@@ -345,6 +345,7 @@ class BasicLayer(nn.Module):
             else:
                 cluster_mask = mask.permute(0,2,1)
 
+        k = self.k
         for blk in self.blocks:
             if self.use_checkpoint:
                 cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask)
