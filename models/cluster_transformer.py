@@ -346,12 +346,13 @@ class BasicLayer(nn.Module):
                 cluster_mask = mask.permute(0,2,1)
 
         k = self.k
-        for blk in self.blocks:
+        for i_blk in range(len(self.blocks)):
+            blk = self.blocks[i_blk]
             if self.use_checkpoint:
                 cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask)
             else:
                 cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask)
-            if self.k>1 and kmeans_after_blk:
+            if self.k>1 and kmeans_after_blk and i_blk<len(self.blocks)-1:
                 # re-calculate clusters
                 if cluster_mask is not None:
                     cluster_count = cluster_mask.sum(dim=1)
