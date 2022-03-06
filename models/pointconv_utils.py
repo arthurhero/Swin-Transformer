@@ -51,15 +51,16 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
     '''
     _, m, c = cluster_feat.shape
     d = cluster_pos.shape[2]
-    irregular = cluster_mask is not None
     if valid_row_idx is not None:
-        assert irregular, "cluster mask must not be None"
         new_pos = cluster_pos.new(b*k,m,d).zero_().long()
         new_feat = cluster_feat.new(b*k,m,c).zero_()
         new_mask = cluster_mask.new(b*k,m,1).zero_().long()
         new_feat[valid_row_idx] = cluster_feat
         new_pos[valid_row_idx] = cluster_pos
-        new_mask[valid_row_idx] = cluster_mask
+        if cluster_mask is None:
+            new_mask[valid_row_idx] = 1
+        else:
+            new_mask[valid_row_idx] = cluster_mask
     else:
         new_feat = cluster_feat
         new_pos = cluster_pos
@@ -67,10 +68,10 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
 
     new_feat = new_feat.reshape(b,k,m,c).permute(0,3,1,2).reshape(b,c,-1) # b x c x n
     new_pos = new_pos.reshape(b,k,m,d).permute(0,3,1,2).reshape(b,d,-1) # b x d x n
-    if irregular:
+    if new_mask is not None:
         new_mask = new_mask.reshape(b,k,m,1).permute(0,3,1,2).reshape(b,1,-1) # b x 1 x n
 
-    if irregular and filter_invalid:
+    if new_mask is not None and filter_invalid:
         largest_n = new_mask.sum(2).max() # largest sample size
         valid_idx = new_mask.view(-1).nonzero().squeeze() # z
         batch_idx = torch.arange(b,device=valid_idx.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1)[valid_idx] # z
@@ -119,6 +120,8 @@ def points2cluster(pos, feat, member_idx, cluster_mask):
             cluster_mask = cluster_mask[valid_row_idx]
         cluster_pos *= cluster_mask
         cluster_feat *= cluster_mask
+        if cluster_mask.min() > 0:
+            cluster_mask = None
     else:
         cluster_mask = None
         valid_row_idx = None
