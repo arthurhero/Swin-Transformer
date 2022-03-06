@@ -326,7 +326,7 @@ class BasicLayer(nn.Module):
         feat - b x c x n
         mask - b x 1 x n
         '''
-        kmeans_after_blk = True
+        kmeans_after_blk = False
         b,d,n = pos.shape
         c = feat.shape[1]
         if self.k == 0 or self.cluster_size != 0:
