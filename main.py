@@ -179,7 +179,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        outputs = model(samples.to(torch.float32))
+        outputs = model(samples)
 
         if config.TRAIN.ACCUMULATION_STEPS > 1:
             loss = criterion(outputs, targets)
@@ -270,7 +270,7 @@ def validate(config, data_loader, model):
         #images = F.interpolate(images, size=88, mode = 'bicubic')
 
         # compute output
-        output = model(images.to(torch.float32))
+        output = model(images)
 
         # measure accuracy and record loss
         loss = criterion(output, target)
