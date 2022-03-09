@@ -161,6 +161,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     num_steps = len(data_loader)
     batch_time = AverageMeter()
     loss_meter = AverageMeter()
+    ds_loss_meter = AverageMeter()
     norm_meter = AverageMeter()
 
     img_sizes = [24,32,40]
@@ -179,20 +180,27 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        outputs = model(samples)
+        outputs, avg_gsm_score = model(samples)
+        target_keep_ratio = 1/4.0
+        ds_lambda = 1.0
 
         if config.TRAIN.ACCUMULATION_STEPS > 1:
             loss = criterion(outputs, targets)
             loss = loss / config.TRAIN.ACCUMULATION_STEPS
+            ds_loss = 0.0
+            if avg_gsm_score is not None:
+                ds_loss = (avg_gsm_score-target_keep_ratio).pow(2)
+                ds_loss = ds_loss / config.TRAIN.ACCUMULATION_STEPS
+            total_loss = loss + ds_lambda * ds_loss
             if config.AMP_OPT_LEVEL != "O0":
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                with amp.scale_loss(total_loss, optimizer) as scaled_loss:
                     scaled_loss.backward()
                 if config.TRAIN.CLIP_GRAD:
                     grad_norm = torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), config.TRAIN.CLIP_GRAD)
                 else:
                     grad_norm = get_grad_norm(amp.master_params(optimizer))
             else:
-                loss.backward()
+                total_loss.backward()
                 if config.TRAIN.CLIP_GRAD:
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.TRAIN.CLIP_GRAD)
                 else:
@@ -203,9 +211,13 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 lr_scheduler.step_update(epoch * num_steps + idx)
         else:
             loss = criterion(outputs, targets)
+            ds_loss = 0.0
+            if avg_gsm_score is not None:
+                ds_loss = (avg_gsm_score-target_keep_ratio).pow(2)
+            total_loss = loss + ds_lambda * ds_loss
             optimizer.zero_grad()
             if config.AMP_OPT_LEVEL != "O0":
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                with amp.scale_loss(total_loss, optimizer) as scaled_loss:
                     '''
                     print("before bw", torch.cuda.memory_allocated()/1024/1024, "mb")
                     print("before bw max", torch.cuda.max_memory_allocated()/1024/1024, "mb")
@@ -221,7 +233,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 else:
                     grad_norm = get_grad_norm(amp.master_params(optimizer))
             else:
-                loss.backward()
+                total_loss.backward()
                 if config.TRAIN.CLIP_GRAD:
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.TRAIN.CLIP_GRAD)
                 else:
@@ -232,6 +244,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         torch.cuda.synchronize()
 
         loss_meter.update(loss.item(), targets.size(0))
+        ds_loss_meter.update(ds_loss.item(), targets.size(0))
         norm_meter.update(grad_norm)
         batch_time.update(time.time() - end)
         end = time.time()
@@ -245,6 +258,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t'
                 f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
                 f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
+                f'ds_loss {ds_loss_meter.val:.4f} ({ds_loss_meter.avg:.4f})\t'
                 f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
                 f'mem {memory_used:.0f}MB')
     epoch_time = time.time() - start
