@@ -375,7 +375,7 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
-            if self.downsample==ClusterMerging:
+            if downsample==ClusterMerging:
                 self.downsample = downsample(dim=dim, keep_num = int(math.ceil(self.cluster_size / 4)), norm_layer=norm_layer)
             else:
                 self.downsample = downsample(dim=dim, norm_layer=norm_layer)
