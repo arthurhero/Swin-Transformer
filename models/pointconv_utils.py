@@ -60,7 +60,6 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
         if cluster_mask is None:
             new_mask[valid_row_idx] = 1
         else:
-            new_mask = new_mask.to(cluster_mask.dtype)
             new_mask[valid_row_idx] = cluster_mask
     else:
         new_feat = cluster_feat
@@ -75,9 +74,10 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
     if new_mask is not None and filter_invalid:
         new_mask_sum = new_mask.sum(2)
         largest_n = int(new_mask_sum.max().item()) # largest sample size
-        #print("max size, max,min,avg", max_size, largest_n,new_mask_sum.min().item(),new_mask_sum.float().mean().item())
         if max_size is not None and max_size < largest_n:
             largest_n = max_size
+        if largest_n == new_feat.shape[2]:
+            return new_pos, new_feat, new_mask
         valid_idx = new_mask.view(-1).nonzero().squeeze() # z
         batch_idx = torch.arange(b,device=valid_idx.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1)[valid_idx] # z
 

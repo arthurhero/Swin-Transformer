@@ -273,27 +273,27 @@ class ClusterMerging(nn.Module):
         Doubles the output channel size
     """
 
-    def __init__(self, dim, norm_layer=nn.LayerNorm):
+    def __init__(self, dim, keep_num, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
         self.norm = norm_layer(2 * dim)
         self.linear = nn.Linear(2 * dim, 2 * dim, bias=False)
-        self.ds = nn.Linear(dim + 1, 1, bias=False)
+        self.ds = nn.Linear(dim, keep_num, bias=False)
+        self.keep_num = keep_num
 
-    def forward(self, pos, feat, mask, valid_row_idx, b, real_k, tau = 5.0, max_keep_num = None):
+    def forward(self, pos, feat, mask, valid_row_idx, b, real_k):
         """
         pos - k x m x d
         feat - k x m x c
         mask - k x m x 1
-        tau - temperature for gumbel softmax
         return
         pos - b x d x n
         feat - b x c x n
         mask - b x 1 x n
-        avg gsm score - scalar, used in loss
         """
         k,m,c = feat.shape
         d = pos.shape[2]
+        keep_num = self.keep_num
         assert c == self.dim, "channel size does not accord"
         if mask is not None:
             count = mask.sum(dim=1)
@@ -302,37 +302,26 @@ class ClusterMerging(nn.Module):
         else:
             count = torch.zeros(k,1,device=feat.device) + m # k x 1
             feat_means = feat.mean(dim=1)
-        count_inv = (1.0 / count).unsqueeze(1).expand(-1,m,-1) # k x m x 1
-        assert torch.isnan(count_inv).any() == False, "count_inv has nan"
-        feat_count = torch.cat([feat,count_inv],dim=2) # k x m x (c+1)
-        keep_prob = F.sigmoid(self.ds(feat_count)) # k x m x 1
-        logits = torch.cat([keep_prob,1-keep_prob],dim=2).log() # k x m x 2
-        gsm_score_soft = F.gumbel_softmax(logits, tau = tau, hard = False, dim = 2)[:,:,0:1].clone() # k x m x 1, only get the result for keep
+        keep_sm = self.ds(feat) # k x m x keep_num
+        keep_sm_exp = keep_sm.exp()
         if mask is not None:
-            gsm_score_soft *= mask
-        gsm_score_hard = (gsm_score_soft > 0.5).float()
-        gsm_score = gsm_score_hard - gsm_score_soft.detach() +  gsm_score_soft
-        avg_gsm_score = gsm_score.sum() / count.sum() # for the loss
-        '''
-        print("avg score", avg_gsm_score)
-        print("gsm sum",gsm_score.sum(),"gsm soft sum", gsm_score_soft.sum(), "keep prob sum", keep_prob.sum(), "mask sum", count.sum(), "total", k*m)
-        '''
-        feat = feat * gsm_score
+            keep_sm_exp *= mask
+        keep_sm_exp_sum = keep_sm_exp.sum(dim=1,keepdim=True) # k x 1 x keep_num
+        assert keep_sm_exp_sum.min() > 0, "keep_sm_exp_sum has 0!"
+        keep_score = keep_sm_exp / keep_sm_exp_sum # k x m x keep_num
+        keep_idx = keep_score.max(dim=1)[1] # k x keep_num, for collecting pos
 
-        feat = torch.cat([feat, feat_means.unsqueeze(1).expand(-1,m,-1)], dim=-1) # k x m x 2c
-        '''
-        print("max size", max_keep_num)
-        print("gsm score",gsm_score.shape, gsm_score[0,:10,0])
-        '''
-        new_pos, new_feat, new_mask = cluster2points(pos, feat, gsm_score, valid_row_idx, b, real_k, filter_invalid=True, max_size = max_keep_num)
+        feat_merged = (feat[:,:,:,None] * keep_score[:,:,None,:]).sum(1).permute(0,2,1) # k x keep_num x c
+        pos_merged = pos.gather(index = keep_idx.unsqueeze(2).expand(-1,-1,d),dim=1) # k x keep_num x d
+
+        feat_merged = torch.cat([feat_merged, feat_means.unsqueeze(1).expand(-1,keep_num,-1)], dim=-1) # k x keep_num x 2c
+        new_pos, new_feat, new_mask = cluster2points(pos_merged, feat_merged, None, valid_row_idx, b, real_k, filter_invalid=True)
 
         new_feat = new_feat.permute(0,2,1) # b x n x c
         new_feat = self.norm(new_feat)
         new_feat = self.linear(new_feat)
         new_feat = new_feat.permute(0,2,1)
-        if new_mask is not None:
-            new_mask = new_mask.long()
-        return new_pos, new_feat, new_mask, avg_gsm_score
+        return new_pos, new_feat, new_mask
 
 
 class BasicLayer(nn.Module):
@@ -386,7 +375,10 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
-            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+            if self.downsample==ClusterMerging:
+                self.downsample = downsample(dim=dim, keep_num = int(math.ceil(self.cluster_size / 4)), norm_layer=norm_layer)
+            else:
+                self.downsample = downsample(dim=dim, norm_layer=norm_layer)
         else:
             self.downsample = None
 
@@ -448,14 +440,9 @@ class BasicLayer(nn.Module):
                 del feat_means, pos_means, new_pos, new_feat, new_mask
 
         if self.downsample is not None and isinstance(self.downsample, ClusterMerging):
-            max_keep_num = int(math.ceil(1/4.0 * n))
-            #print("use cluster merge!!!!")
-            new_pos, new_feat, new_mask, avg_gsm_score = self.downsample(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k, 
-                    tau = 5.0, max_keep_num = max_keep_num)
-            #print("avg gsm score", avg_gsm_score)
-            return new_pos, new_feat, new_mask, avg_gsm_score
+            new_pos, new_feat, new_mask = self.downsample(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k) 
+            return new_pos, new_feat, new_mask
         else:
-            #print("not using cluster merg!!!!!!!!")
             if self.k==1:
                 new_pos = cluster_pos.permute(0,2,1)
                 new_feat = cluster_feat.permute(0,2,1)
