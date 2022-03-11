@@ -180,17 +180,17 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        outputs, avg_gsm_score = model(samples)
-        target_keep_ratio = 1/4.0
-        ds_lambda = 1.0
+        outputs, gsms = model(samples)
+        target_keep_ratio = 1/5.0
+        ds_lambda = 20.0
 
         if config.TRAIN.ACCUMULATION_STEPS > 1:
             loss = criterion(outputs, targets)
             loss = loss / config.TRAIN.ACCUMULATION_STEPS
-            ds_loss = 0.0
-            if avg_gsm_score is not None:
-                ds_loss = (avg_gsm_score-target_keep_ratio).pow(2)
-                ds_loss = ds_loss / config.TRAIN.ACCUMULATION_STEPS
+            ds_loss = loss.new(1,).zero_()
+            for gsm in gsms:
+                ds_loss += (gsm-target_keep_ratio).pow(2)
+            ds_loss = ds_loss / config.TRAIN.ACCUMULATION_STEPS
             total_loss = loss + ds_lambda * ds_loss
             if config.AMP_OPT_LEVEL != "O0":
                 with amp.scale_loss(total_loss, optimizer) as scaled_loss:
@@ -211,9 +211,9 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 lr_scheduler.step_update(epoch * num_steps + idx)
         else:
             loss = criterion(outputs, targets)
-            ds_loss = 0.0
-            if avg_gsm_score is not None:
-                ds_loss = (avg_gsm_score-target_keep_ratio).pow(2)
+            ds_loss = loss.new(1,).zero_()
+            for gsm in gsms:
+                ds_loss += (gsm-target_keep_ratio).pow(2)
             total_loss = loss + ds_lambda * ds_loss
             optimizer.zero_grad()
             if config.AMP_OPT_LEVEL != "O0":
@@ -284,7 +284,7 @@ def validate(config, data_loader, model):
         #images = F.interpolate(images, size=88, mode = 'bicubic')
 
         # compute output
-        output = model(images)
+        output, _ = model(images)
 
         # measure accuracy and record loss
         loss = criterion(output, target)

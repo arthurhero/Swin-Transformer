@@ -60,6 +60,7 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
         if cluster_mask is None:
             new_mask[valid_row_idx] = 1
         else:
+            new_mask = new_mask.to(cluster_mask.dtype)
             new_mask[valid_row_idx] = cluster_mask
     else:
         new_feat = cluster_feat
@@ -72,7 +73,9 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
         new_mask = new_mask.reshape(b,k,m,1).permute(0,3,1,2).reshape(b,1,-1) # b x 1 x n
 
     if new_mask is not None and filter_invalid:
-        largest_n = new_mask.sum(2).max() # largest sample size
+        new_mask_sum = new_mask.sum(2)
+        largest_n = int(new_mask_sum.max().item()) # largest sample size
+        #print("max size, max,min,avg", max_size, largest_n,new_mask_sum.min().item(),new_mask_sum.float().mean().item())
         if max_size is not None and max_size < largest_n:
             largest_n = max_size
         valid_idx = new_mask.view(-1).nonzero().squeeze() # z
@@ -82,18 +85,15 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
         valid_pos = new_pos.permute(0,2,1).view(-1,d)[valid_idx] # z x d
         valid_mask = new_mask.permute(0,2,1).view(-1,1)[valid_idx] # z x 1
         z = len(valid_idx)
-        rotate_idx = torch.arange(largest_n,device=valid_mask.device).long().repeat(torch.ceil(z/largest_n).long().item())[:z]
+        rotate_idx = torch.arange(largest_n,device=valid_mask.device).long().repeat(int(math.ceil(z/largest_n)))[:z]
         new_pos = cluster_pos.new(b,d,largest_n).zero_().long()
         new_feat = cluster_feat.new(b,c,largest_n).zero_()
-        new_mask = cluster_feat.new(b,1,largest_n).zero_().long()
+        new_mask = cluster_feat.new(b,1,largest_n).zero_().to(valid_mask.dtype)
         new_pos[batch_idx,:,rotate_idx] = valid_pos
         new_feat[batch_idx,:,rotate_idx] = valid_feat
         new_mask[batch_idx,:,rotate_idx] = valid_mask
         if new_mask.min() == 1:
             new_mask = None
-        else:
-            sample_size = new_mask.sum(-1)
-            print("max, min sample size", sample_size.max(), sample_size.min())
     return new_pos, new_feat, new_mask
 
 def points2cluster(pos, feat, member_idx, cluster_mask):

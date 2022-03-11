@@ -9,6 +9,7 @@ import math
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from .pointconv_utils import points2img, kmeans_keops, cluster2points, points2cluster
@@ -277,7 +278,7 @@ class ClusterMerging(nn.Module):
         self.dim = dim
         self.norm = norm_layer(2 * dim)
         self.linear = nn.Linear(2 * dim, 2 * dim, bias=False)
-        self.ds = nn.Linear(dim + 1, bias=False)
+        self.ds = nn.Linear(dim + 1, 1, bias=False)
 
     def forward(self, pos, feat, mask, valid_row_idx, b, real_k, tau = 5.0, max_keep_num = None):
         """
@@ -294,7 +295,7 @@ class ClusterMerging(nn.Module):
         k,m,c = feat.shape
         d = pos.shape[2]
         assert c == self.dim, "channel size does not accord"
-        if mask is None:
+        if mask is not None:
             count = mask.sum(dim=1)
             assert count.min() > 0, "count min must be positive"
             feat_means = feat.sum(dim=1) / count # k' x c
@@ -306,19 +307,31 @@ class ClusterMerging(nn.Module):
         feat_count = torch.cat([feat,count_inv],dim=2) # k x m x (c+1)
         keep_prob = F.sigmoid(self.ds(feat_count)) # k x m x 1
         logits = torch.cat([keep_prob,1-keep_prob],dim=2).log() # k x m x 2
-        gsm_score = gumbel_softmax(logits, tau = tau, hard = True, dim = 2)[:,:,0:1] # k x m x 1, only get the result for keep
+        gsm_score_soft = F.gumbel_softmax(logits, tau = tau, hard = False, dim = 2)[:,:,0:1].clone() # k x m x 1, only get the result for keep
         if mask is not None:
-            gsm_score *= mask
+            gsm_score_soft *= mask
+        gsm_score_hard = (gsm_score_soft > 0.5).float()
+        gsm_score = gsm_score_hard - gsm_score_soft.detach() +  gsm_score_soft
         avg_gsm_score = gsm_score.sum() / count.sum() # for the loss
+        '''
+        print("avg score", avg_gsm_score)
+        print("gsm sum",gsm_score.sum(),"gsm soft sum", gsm_score_soft.sum(), "keep prob sum", keep_prob.sum(), "mask sum", count.sum(), "total", k*m)
+        '''
         feat = feat * gsm_score
 
-        feat = torch.concat([feat, feat_means.unsqueeze(1).expand(-1,m,-1)]) # k x m x 2c
-        new_pos, new_feat, new_mask = cluster2points(pos, feat_avg, gsm_score, valid_row_idx, b, real_k, filter_invalid=True, max_size = max_keep_num)
+        feat = torch.cat([feat, feat_means.unsqueeze(1).expand(-1,m,-1)], dim=-1) # k x m x 2c
+        '''
+        print("max size", max_keep_num)
+        print("gsm score",gsm_score.shape, gsm_score[0,:10,0])
+        '''
+        new_pos, new_feat, new_mask = cluster2points(pos, feat, gsm_score, valid_row_idx, b, real_k, filter_invalid=True, max_size = max_keep_num)
 
         new_feat = new_feat.permute(0,2,1) # b x n x c
         new_feat = self.norm(new_feat)
         new_feat = self.linear(new_feat)
         new_feat = new_feat.permute(0,2,1)
+        if new_mask is not None:
+            new_mask = new_mask.long()
         return new_pos, new_feat, new_mask, avg_gsm_score
 
 
@@ -383,7 +396,7 @@ class BasicLayer(nn.Module):
         feat - b x c x n
         mask - b x 1 x n
         '''
-        kmeans_after_blk = True 
+        kmeans_after_blk = False 
         b,d,n = pos.shape
         c = feat.shape[1]
         if self.k == 0 or self.cluster_size != 0:
@@ -434,12 +447,15 @@ class BasicLayer(nn.Module):
                 cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(new_pos, new_feat, member_idx, cluster_mask)
                 del feat_means, pos_means, new_pos, new_feat, new_mask
 
-        if self.downsample is not None and isintance(self.downsample, ClusterMerging):
-            max_keep_num = int(math.ceil(1/3.0 * n))
+        if self.downsample is not None and isinstance(self.downsample, ClusterMerging):
+            max_keep_num = int(math.ceil(1/4.0 * n))
+            #print("use cluster merge!!!!")
             new_pos, new_feat, new_mask, avg_gsm_score = self.downsample(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k, 
                     tau = 5.0, max_keep_num = max_keep_num)
+            #print("avg gsm score", avg_gsm_score)
             return new_pos, new_feat, new_mask, avg_gsm_score
         else:
+            #print("not using cluster merg!!!!!!!!")
             if self.k==1:
                 new_pos = cluster_pos.permute(0,2,1)
                 new_feat = cluster_feat.permute(0,2,1)
@@ -452,7 +468,7 @@ class BasicLayer(nn.Module):
                     print('min kept point ratio before ds',new_mask.sum(-1).min() / n)
                     print('avg kept point ratio before ds',new_mask.sum() / (b*n))
                     '''
-            if self.downsample is not None and isintance(self.downsample, PatchMerging):
+            if self.downsample is not None and isinstance(self.downsample, PatchMerging):
                 new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
             return new_pos, new_feat, new_mask
 
@@ -616,25 +632,26 @@ class ClusterTransformer(nn.Module):
         '''
         pos, x, mask = self.patch_embed(x) # b x c x n, b x d x n
         x = self.pos_drop(x)
+        gsms = list()
 
         for i_layer in range(len(self.layers)):
             layer = self.layers[i_layer]
             ret = layer(pos, x, mask)
             if len(ret) == 3:
                 pos, x, mask = ret
-                avg_gsm_score = None
             else:
                 pos, x, mask, avg_gsm_score = ret
+                gsms.append(avg_gsm_score)
 
         x = self.norm(x.permute(0,2,1)) # b x n x c
         x = self.avgpool(x.transpose(1, 2))  # b x c x 1
         x = torch.flatten(x, 1)
-        return x, avg_gsm_score
+        return x, gsms 
 
     def forward(self, x):
-        x, avg_gsm_score = self.forward_features(x)
+        x, gsms = self.forward_features(x)
         x = self.head(x)
-        return x, avg_gsm_score
+        return x, gsms 
 
     def flops(self):
         flops = 0
