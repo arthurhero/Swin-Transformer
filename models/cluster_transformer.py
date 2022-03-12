@@ -305,7 +305,7 @@ class ClusterMerging(nn.Module):
         keep_sm = self.ds(feat) # k x m x keep_num
         keep_sm_exp = keep_sm.exp()
         if mask is not None:
-            keep_sm_exp *= mask
+            keep_sm_exp = keep_sm_exp * mask
         keep_sm_exp_sum = keep_sm_exp.sum(dim=1,keepdim=True) # k x 1 x keep_num
         assert keep_sm_exp_sum.min() > 0, "keep_sm_exp_sum has 0!"
         keep_score = keep_sm_exp / keep_sm_exp_sum # k x m x keep_num

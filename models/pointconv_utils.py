@@ -54,7 +54,7 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
     if valid_row_idx is not None:
         new_pos = cluster_pos.new(b*k,m,d).zero_().long()
         new_feat = cluster_feat.new(b*k,m,c).zero_()
-        new_mask = cluster_mask.new(b*k,m,1).zero_().long()
+        new_mask = cluster_feat.new(b*k,m,1).zero_().long()
         new_feat[valid_row_idx] = cluster_feat
         new_pos[valid_row_idx] = cluster_pos
         if cluster_mask is None:
