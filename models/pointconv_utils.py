@@ -54,7 +54,7 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
     if valid_row_idx is not None:
         new_pos = cluster_pos.new(b*k,m,d).zero_().long()
         new_feat = cluster_feat.new(b*k,m,c).zero_()
-        new_mask = cluster_mask.new(b*k,m,1).zero_().long()
+        new_mask = cluster_feat.new(b*k,m,1).zero_().long()
         new_feat[valid_row_idx] = cluster_feat
         new_pos[valid_row_idx] = cluster_pos
         if cluster_mask is None:
@@ -97,7 +97,7 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
             new_mask = None
     return new_pos, new_feat, new_mask
 
-def points2cluster(pos, feat, member_idx, cluster_mask):
+def points2cluster(pos, feat, member_idx, cluster_mask, mask=None):
     '''
     pos - b x d x n
     feat - b x c x n
@@ -112,6 +112,8 @@ def points2cluster(pos, feat, member_idx, cluster_mask):
     member_idx = (batch_tmp*n+member_idx).view(-1)
     cluster_pos = pos.permute(0,2,1).reshape(-1,d)[member_idx].reshape(b,m,k,d).permute(0,2,1,3).reshape(-1,m,d)
     cluster_feat = feat.permute(0,2,1).reshape(-1,c)[member_idx].reshape(b,m,k,c).permute(0,2,1,3).reshape(-1,m,c)
+    if mask is not None:
+        mask = mask.permute(0,2,1).reshape(-1,1)[member_idx].reshape(b,m,k,1).permute(0,2,1,3).reshape(-1,m,1)
     # get valid cluster id
     irregular = cluster_mask is not None and cluster_mask.min() == 0
     if irregular:
@@ -124,14 +126,21 @@ def points2cluster(pos, feat, member_idx, cluster_mask):
             cluster_pos = cluster_pos[valid_row_idx]
             cluster_feat = cluster_feat[valid_row_idx]
             cluster_mask = cluster_mask[valid_row_idx]
+            if mask is not None:
+                mask = mask[valid_row_idx]
         cluster_pos *= cluster_mask
         cluster_feat *= cluster_mask
+        if mask is not None:
+            mask *= cluster_mask
         if cluster_mask.min() > 0:
             cluster_mask = None
     else:
         cluster_mask = None
         valid_row_idx = None
-    return cluster_pos, cluster_feat, cluster_mask, valid_row_idx
+    if mask is not None:
+        return cluster_pos, cluster_feat, mask, valid_row_idx
+    else:
+        return cluster_pos, cluster_feat, cluster_mask, valid_row_idx
 
 def random_sampling(pc_pos, feature, num_samples):
     '''

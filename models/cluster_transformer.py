@@ -95,11 +95,13 @@ class ClusterAttention(nn.Module):
 
         attn = attn + pos_bias 
         if mask is not None:
-            mask = mask.permute(0,2,1).unsqueeze(2) # k x 1 x 1 x m
-            mask = (1-mask)*(-100) # 1->0, 0->-100
-
-            attn = attn + mask
-        attn = self.softmax(attn)
+            mask = mask.permute(0,2,1).unsqueeze(2).expand(-1,-1,m,-1) # k x 1 x m x m
+            mask = (mask + torch.eye(m,device = mask.device, dtype = mask.dtype)).clamp(max=1) # self-loop
+            attn_exp = attn.exp()
+            attn_exp = attn_exp * mask
+            attn = attn_exp / attn_exp.sum(-1,keepdim=True)
+        else:
+            attn = self.softmax(attn)
 
         attn = self.attn_drop(attn)
 
@@ -202,7 +204,7 @@ class PatchMerging(nn.Module):
     def __init__(self, dim, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
-        self.norm = norm_layer(4 * dim)
+        self.norm = norm_layer(dim)
         self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
 
     def forward(self, pos, feat, mask=None):
@@ -222,10 +224,11 @@ class PatchMerging(nn.Module):
         h = (torch.ceil(max_y / 2.0)*2).long().item() # make sure the number is even
         w = (torch.ceil(max_x / 2.0)*2).long().item()
         feat = points2img(pos, feat, h, w) # b x c x h x w
+        x = feat
+        x = self.norm(x)
         if mask is not None:
             mask = points2img(pos, mask, h, w) # b x 1 x h x w
             feat *= mask
-        x = feat
 
         x0 = x[:,:, 0::2, 0::2]
         x1 = x[:,:, 1::2, 0::2]
@@ -233,10 +236,8 @@ class PatchMerging(nn.Module):
         x3 = x[:,:, 1::2, 1::2]
         x = torch.cat([x0, x1, x2, x3], 1).permute(0,2,3,1)  # b x h x w x 4*c
 
-        x = self.norm(x)
         x = self.reduction(x).permute(0,3,1,2)
         _,c,h,w = x.shape
-        x = x.view(b,c,-1)
 
         # create new pos tensor
         pos = feat.new(b,2,h,w).zero_().long()
@@ -247,13 +248,19 @@ class PatchMerging(nn.Module):
         ys=ys.unsqueeze(0).expand(b,-1,-1)
         pos[:,0,:,:]=xs
         pos[:,1,:,:]=ys
-        pos = pos.view(b,2,-1)
 
         # mask
         if mask is not None:
-            mask = nn.AdaptiveMaxPool2d((h,w))(mask.float()).long()
+            mask_avg = nn.AdaptiveAvgPool2d((h,w))(mask.float())
+            x = x / mask_avg
+            mask = nn.AdaptiveMaxPool2d((h,w))(mask.float())
+            x = x * mask
+            assert torch.isnan(x).any() == False, "x has nan in patch merging!"
+            pos = pos * mask
             mask = mask.view(b,1,-1)
 
+        x = x.view(b,c,-1)
+        pos = pos.view(b,2,-1)
         return pos, x, mask
 
     def extra_repr(self) -> str:
@@ -263,61 +270,62 @@ class PatchMerging(nn.Module):
         flops = 0
         return flops
 
-class ClusterMerging(nn.Module):
-    r""" Cluster Merging Layer.
+class AdaptiveDownsample(nn.Module):
+    r""" Adaptive Doownsampling Layer.
 
     Args:
         dim (int): Number of input channels.
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
-        Doubles the output channel size
     """
 
-    def __init__(self, dim, keep_num, norm_layer=nn.LayerNorm):
+    def __init__(self, dim):
         super().__init__()
         self.dim = dim
-        self.norm = norm_layer(4 * dim)
-        self.linear = nn.Linear(4 * dim, 2 * dim, bias=False)
-        self.ds = nn.Linear(dim, keep_num, bias=False)
+        self.fc = nn.Linear(dim, dim // 2)
+        self.act = nn.GELU()
+        self.ds = nn.Linear(dim, 2)
 
-    def forward(self, pos, feat, mask, valid_row_idx, b, real_k):
+    def forward(self, feat, mask, b, real_k, valid_row_idx, tau=5.0):
         """
-        pos - k x m x d
         feat - k x m x c
         mask - k x m x 1
         return
-        pos - b x d x n
-        feat - b x c x n
-        mask - b x 1 x n
+        mask - k x m x 1, float, differentiable
         """
         k,m,c = feat.shape
-        d = pos.shape[2]
         assert c == self.dim, "channel size does not accord"
-        pos, feat, mask = cluster2points(pos, feat, mask, valid_row_idx, b, real_k, filter_invalid=True)
+        feat = self.act(self.fc(feat))
 
-        # differentiable kmeans
-        feat = feat.permute(0,2,1) # b x n x c
-        mask = mask.permute(0,2,1) # b x n x 1
-        feat_vote = self.ds(feat) # b x n x keep_num 
-        feat_vote_exp = feat_vote.exp()
-        if mask is not None:
-            feat_vote_exp = feat_vote_exp * mask
-        feat_vote_sm = feat_vote_exp / feat_vote_exp.sum(-1,keepdim=True)
-        feat_means = (feat[:,:,None,:] * feat_vote_sm[:,:,:,None]).sum(1) # b x keep_num x c
-        for _ in range(5):
-            feat_dist = (feat[:,:,None,:] - feat_means[:,None,:,:]).pow(2).sum(-1) # b x n x keep_num
-            feat_weight = 1.0 / (feat_dist + 1e-5)
+        if valid_row_idx is not None:
+            feat_full = feat.new(b*real_k,m,c).zero_()
+            mask_full = feat.new(b*real_k,m,1).zero_()
+            feat_full[valid_row_idx] = feat
+            if mask is None:
+                mask_full[valid_row_idx] = 1
+            else:
+                mask_full[valid_row_idx] = mask.float()
+            feat_full = feat_full.reshape(b,real_k*m,c)
+            mask_full = mask_full.reshape(b,real_k*m,1)
+        else:
+            feat_full = feat.reshape(b,-1,c)
             if mask is not None:
-                feat_weight = feat_weight * mask
-            feat_weight = feat_weight / feat_weight.sum(-1,keepdim=True) # b x n x keep_num
-            feat_means = (feat[:,:,None,:] * feat_weight[:,:,:,None]).sum(1) # b x keep_num x c
-            feat_means = feat_means / feat_weight.sum(1).unsqueeze(2) # b x keep_num x c
+                mask_full = mask.reshape(b,-1,1)
+            else:
+                mask_full = None
 
-        new_feat = new_feat.permute(0,2,1) # b x n x c
-        new_feat = self.norm(new_feat)
-        new_feat = self.linear(new_feat)
-        new_feat = new_feat.permute(0,2,1)
-        return new_pos, new_feat, new_mask
+        if mask_full is None:
+            feat_avg = feat_full.mean(1,keepdim=True)
+        else:
+            feat_avg = feat_full.sum(1,keepdim=True) / mask_full.sum(1,keepdim=True)
 
+        assert torch.isnan(feat_avg).any() == False, "feat_avg has nan!"
+        feat = torch.cat([feat,feat_avg.expand(-1,real_k*m,-1)],dim=2) # b x n x c
+        keep_prob = F.softmax(self.ds(feat),dim=-1) # k x m x 2
+        logits = keep_prob.log() # k x m x 2
+        gsm_score = F.gumbel_softmax(logits, tau = tau, hard = True, dim = 2)[:,:,0:1].clone() # k x m x 1, only get the result for keep
+        if mask is not None:
+            gsm_score = gsm_score * mask
+        return gsm_score
 
 class BasicLayer(nn.Module):
     """ A basic cluster Transformer layer for one stage.
@@ -345,7 +353,7 @@ class BasicLayer(nn.Module):
 
     def __init__(self, dim, k, cluster_size, max_cluster_size, depth, num_heads, pos_lambda=0.0003, pos_dim=2, 
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False):
+                 drop_path=0., norm_layer=nn.LayerNorm, downsample=None, adads=None, use_checkpoint=False):
 
         super().__init__()
         self.dim = dim
@@ -370,12 +378,14 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
-            if downsample==ClusterMerging:
-                self.downsample = downsample(dim=dim, norm_layer=norm_layer)
-            else:
-                self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
         else:
             self.downsample = None
+
+        if adads is not None:
+            self.adads = adads(dim=dim)
+        else:
+            self.adads = None
 
     def forward(self, pos, feat, mask=None):
         '''
@@ -383,7 +393,6 @@ class BasicLayer(nn.Module):
         feat - b x c x n
         mask - b x 1 x n
         '''
-        kmeans_after_blk = False 
         b,d,n = pos.shape
         c = feat.shape[1]
         if self.k == 0 or self.cluster_size != 0:
@@ -393,7 +402,7 @@ class BasicLayer(nn.Module):
             with torch.no_grad():
                 _, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random') # b x c x k, b x 1 x n, b x m x k, b x m x k
                 #print("keep ratio", cluster_mask.sum() / (b*n))
-            cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(pos, feat, member_idx, cluster_mask)
+            cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(pos, feat, member_idx, cluster_mask, mask=mask)
         else:
             cluster_pos = pos.permute(0,2,1)
             cluster_feat = feat.permute(0,2,1)
@@ -402,6 +411,9 @@ class BasicLayer(nn.Module):
             else:
                 cluster_mask = mask.permute(0,2,1)
 
+        if self.adads is not None:
+            cluster_mask = self.adads(cluster_feat, cluster_mask) # k x m x 1
+
         k = self.k
         for i_blk in range(len(self.blocks)):
             blk = self.blocks[i_blk]
@@ -409,50 +421,22 @@ class BasicLayer(nn.Module):
                 cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask)
             else:
                 cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask)
-            if self.k>1 and kmeans_after_blk and i_blk<len(self.blocks)-1:
-                # re-calculate clusters
-                if cluster_mask is not None:
-                    cluster_count = cluster_mask.sum(dim=1)
-                    assert cluster_count.min() > 0, "cluster count min must be positive"
-                    feat_means = cluster_feat.sum(dim=1) / cluster_count # k' x c
-                    pos_means = cluster_pos.sum(dim=1) / cluster_count # k' x d
-                else:
-                    feat_means = cluster_feat.mean(dim=1)
-                    pos_means = cluster_pos.float().mean(dim=1)
-                if valid_row_idx is not None:
-                    feat_means_full = torch.zeros(b*k,c,dtype=feat_means.dtype,device=feat_means.device) + float('nan')
-                    pos_means_full = torch.zeros(b*k,d,dtype=pos_means.dtype,device=pos_means.device) + float('nan')
-                    feat_means_full[valid_row_idx] = feat_means
-                    pos_means_full[valid_row_idx] = pos_means
-                    feat_means = feat_means_full
-                    pos_means = pos_means_full
-                feat_means = feat_means.reshape(b,k,c)
-                pos_means = pos_means.reshape(b,k,d)
-                new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k, filter_invalid=True)
-                with torch.no_grad():
-                    _, _, member_idx, cluster_mask = kmeans_keops(new_feat, self.k, max_cluster_size=self.max_cluster_size, num_nearest_mean=1, num_iter=1, pos=new_pos, pos_lambda=self.pos_lambda, valid_mask=new_mask, init_feat_means = feat_means, init_pos_means = pos_means) # b x c x k, b x 1 x n, b x m x k, b x m x k
-                cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(new_pos, new_feat, member_idx, cluster_mask)
-                del feat_means, pos_means, new_pos, new_feat, new_mask
 
-        if self.downsample is not None and isinstance(self.downsample, ClusterMerging):
-            new_pos, new_feat, new_mask = self.downsample(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k) 
-            return new_pos, new_feat, new_mask
+        if self.k==1:
+            new_pos = cluster_pos.permute(0,2,1)
+            new_feat = cluster_feat.permute(0,2,1)
+            new_mask = mask
         else:
-            if self.k==1:
-                new_pos = cluster_pos.permute(0,2,1)
-                new_feat = cluster_feat.permute(0,2,1)
-                new_mask = mask
-            else:
-                # convert back to batches
-                new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k, filter_invalid=True)
+            # convert back to batches
+            new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k, filter_invalid=True)
+            '''
+            if new_mask is not None:
+                print('min kept point ratio before ds',new_mask.sum(-1).min() / n)
+                print('avg kept point ratio before ds',new_mask.sum() / (b*n))
                 '''
-                if new_mask is not None:
-                    print('min kept point ratio before ds',new_mask.sum(-1).min() / n)
-                    print('avg kept point ratio before ds',new_mask.sum() / (b*n))
-                    '''
-            if self.downsample is not None and isinstance(self.downsample, PatchMerging):
-                new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
-            return new_pos, new_feat, new_mask
+        if self.downsample is not None and isinstance(self.downsample, PatchMerging):
+            new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
+        return new_pos, new_feat, new_mask
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, depth={self.depth}"
@@ -542,8 +526,8 @@ class ClusterTransformer(nn.Module):
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, 
-                 #downsample=PatchMerging,
-                 downsample=ClusterMerging,
+                 downsample=PatchMerging,
+                 adads = AdaptiveDownsample,
                  use_checkpoint=False, **kwargs):
         super().__init__()
 
@@ -582,6 +566,7 @@ class ClusterTransformer(nn.Module):
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
                                downsample=downsample if (i_layer < self.num_layers - 1) else None,
+                               adads=adads if (i_layer > 0) else None,
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 
