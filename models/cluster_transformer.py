@@ -225,10 +225,10 @@ class PatchMerging(nn.Module):
         w = (torch.ceil(max_x / 2.0)*2).long().item()
         feat = points2img(pos, feat, h, w) # b x c x h x w
         x = feat
-        x = self.norm(x)
+        x = self.norm(x.permute(0,2,3,1)).permute(0,3,1,2)
         if mask is not None:
             mask = points2img(pos, mask, h, w) # b x 1 x h x w
-            feat *= mask
+            feat = feat * mask
 
         x0 = x[:,:, 0::2, 0::2]
         x1 = x[:,:, 1::2, 0::2]
@@ -252,11 +252,10 @@ class PatchMerging(nn.Module):
         # mask
         if mask is not None:
             mask_avg = nn.AdaptiveAvgPool2d((h,w))(mask.float())
-            x = x / mask_avg
+            x = x / (mask_avg+1e-8)
             mask = nn.AdaptiveMaxPool2d((h,w))(mask.float())
             x = x * mask
             assert torch.isnan(x).any() == False, "x has nan in patch merging!"
-            pos = pos * mask
             mask = mask.view(b,1,-1)
 
         x = x.view(b,c,-1)
@@ -297,17 +296,17 @@ class AdaptiveDownsample(nn.Module):
         feat = self.act(self.fc(feat))
 
         if valid_row_idx is not None:
-            feat_full = feat.new(b*real_k,m,c).zero_()
+            feat_full = feat.new(b*real_k,m,c//2).zero_()
             mask_full = feat.new(b*real_k,m,1).zero_()
             feat_full[valid_row_idx] = feat
             if mask is None:
                 mask_full[valid_row_idx] = 1
             else:
                 mask_full[valid_row_idx] = mask.float()
-            feat_full = feat_full.reshape(b,real_k*m,c)
+            feat_full = feat_full.reshape(b,real_k*m,c//2)
             mask_full = mask_full.reshape(b,real_k*m,1)
         else:
-            feat_full = feat.reshape(b,-1,c)
+            feat_full = feat.reshape(b,-1,c//2)
             if mask is not None:
                 mask_full = mask.reshape(b,-1,1)
             else:
@@ -317,15 +316,21 @@ class AdaptiveDownsample(nn.Module):
             feat_avg = feat_full.mean(1,keepdim=True)
         else:
             feat_avg = feat_full.sum(1,keepdim=True) / mask_full.sum(1,keepdim=True)
-
         assert torch.isnan(feat_avg).any() == False, "feat_avg has nan!"
-        feat = torch.cat([feat,feat_avg.expand(-1,real_k*m,-1)],dim=2) # b x n x c
+        feat_avg = feat_avg.expand(-1,real_k*m,-1).reshape(-1,m,c//2)
+        if valid_row_idx is not None:
+            feat_avg = feat_avg[valid_row_idx]
+
+        feat = torch.cat([feat,feat_avg],dim=2) # k x m x c
         keep_prob = F.softmax(self.ds(feat),dim=-1) # k x m x 2
         logits = keep_prob.log() # k x m x 2
         gsm_score = F.gumbel_softmax(logits, tau = tau, hard = True, dim = 2)[:,:,0:1].clone() # k x m x 1, only get the result for keep
         if mask is not None:
             gsm_score = gsm_score * mask
-        return gsm_score
+            avg_gsm_score = gsm_score.sum() / mask.sum()
+        else:
+            avg_gsm_score = gsm.mean()
+        return gsm_score, avg_gsm_score
 
 class BasicLayer(nn.Module):
     """ A basic cluster Transformer layer for one stage.
@@ -410,9 +415,10 @@ class BasicLayer(nn.Module):
                 cluster_mask = None 
             else:
                 cluster_mask = mask.permute(0,2,1)
+            valid_row_idx = None
 
         if self.adads is not None:
-            cluster_mask = self.adads(cluster_feat, cluster_mask) # k x m x 1
+            cluster_mask, avg_gsm_score = self.adads(cluster_feat, cluster_mask, b, self.k, valid_row_idx) # k x m x 1
 
         k = self.k
         for i_blk in range(len(self.blocks)):
@@ -436,7 +442,10 @@ class BasicLayer(nn.Module):
                 '''
         if self.downsample is not None and isinstance(self.downsample, PatchMerging):
             new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
-        return new_pos, new_feat, new_mask
+        if self.adads is None:
+            return new_pos, new_feat, new_mask
+        else:
+            return new_pos, new_feat, new_mask, avg_gsm_score
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, depth={self.depth}"
@@ -566,7 +575,8 @@ class ClusterTransformer(nn.Module):
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
                                downsample=downsample if (i_layer < self.num_layers - 1) else None,
-                               adads=adads if (i_layer > 0) else None,
+                               #adads=adads if (i_layer > 0) else None,
+                               adads=None,
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 

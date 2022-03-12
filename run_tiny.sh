@@ -1,4 +1,4 @@
-NUM_PROC=8
+NUM_PROC=4
 #CONFIG_FILE=configs/swin_tiny_patch4_window7_224.yaml
 #CONFIG_FILE=configs/swin_tiny_patch1_window2_cifar_multi.yaml
 #CONFIG_FILE=configs/swin_tiny_patch1_window2_cifar_no_shift.yaml
