@@ -268,7 +268,6 @@ class ClusterMerging(nn.Module):
 
     Args:
         dim (int): Number of input channels.
-        pos_dim: dimension of x,y coordinates
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
         Doubles the output channel size
     """
@@ -276,10 +275,9 @@ class ClusterMerging(nn.Module):
     def __init__(self, dim, keep_num, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
-        self.norm = norm_layer(2 * dim)
-        self.linear = nn.Linear(2 * dim, 2 * dim, bias=False)
+        self.norm = norm_layer(4 * dim)
+        self.linear = nn.Linear(4 * dim, 2 * dim, bias=False)
         self.ds = nn.Linear(dim, keep_num, bias=False)
-        self.keep_num = keep_num
 
     def forward(self, pos, feat, mask, valid_row_idx, b, real_k):
         """
@@ -293,29 +291,26 @@ class ClusterMerging(nn.Module):
         """
         k,m,c = feat.shape
         d = pos.shape[2]
-        keep_num = self.keep_num
         assert c == self.dim, "channel size does not accord"
-        if mask is not None:
-            count = mask.sum(dim=1)
-            assert count.min() > 0, "count min must be positive"
-            feat_means = feat.sum(dim=1) / count # k' x c
-        else:
-            count = torch.zeros(k,1,device=feat.device) + m # k x 1
-            feat_means = feat.mean(dim=1)
-        keep_sm = self.ds(feat) # k x m x keep_num
-        keep_sm_exp = keep_sm.exp()
-        if mask is not None:
-            keep_sm_exp = keep_sm_exp * mask
-        keep_sm_exp_sum = keep_sm_exp.sum(dim=1,keepdim=True) # k x 1 x keep_num
-        assert keep_sm_exp_sum.min() > 0, "keep_sm_exp_sum has 0!"
-        keep_score = keep_sm_exp / keep_sm_exp_sum # k x m x keep_num
-        keep_idx = keep_score.max(dim=1)[1] # k x keep_num, for collecting pos
+        pos, feat, mask = cluster2points(pos, feat, mask, valid_row_idx, b, real_k, filter_invalid=True)
 
-        feat_merged = (feat[:,:,:,None] * keep_score[:,:,None,:]).sum(1).permute(0,2,1) # k x keep_num x c
-        pos_merged = pos.gather(index = keep_idx.unsqueeze(2).expand(-1,-1,d),dim=1) # k x keep_num x d
-
-        feat_merged = torch.cat([feat_merged, feat_means.unsqueeze(1).expand(-1,keep_num,-1)], dim=-1) # k x keep_num x 2c
-        new_pos, new_feat, new_mask = cluster2points(pos_merged, feat_merged, None, valid_row_idx, b, real_k, filter_invalid=True)
+        # differentiable kmeans
+        feat = feat.permute(0,2,1) # b x n x c
+        mask = mask.permute(0,2,1) # b x n x 1
+        feat_vote = self.ds(feat) # b x n x keep_num 
+        feat_vote_exp = feat_vote.exp()
+        if mask is not None:
+            feat_vote_exp = feat_vote_exp * mask
+        feat_vote_sm = feat_vote_exp / feat_vote_exp.sum(-1,keepdim=True)
+        feat_means = (feat[:,:,None,:] * feat_vote_sm[:,:,:,None]).sum(1) # b x keep_num x c
+        for _ in range(5):
+            feat_dist = (feat[:,:,None,:] - feat_means[:,None,:,:]).pow(2).sum(-1) # b x n x keep_num
+            feat_weight = 1.0 / (feat_dist + 1e-5)
+            if mask is not None:
+                feat_weight = feat_weight * mask
+            feat_weight = feat_weight / feat_weight.sum(-1,keepdim=True) # b x n x keep_num
+            feat_means = (feat[:,:,None,:] * feat_weight[:,:,:,None]).sum(1) # b x keep_num x c
+            feat_means = feat_means / feat_weight.sum(1).unsqueeze(2) # b x keep_num x c
 
         new_feat = new_feat.permute(0,2,1) # b x n x c
         new_feat = self.norm(new_feat)
@@ -376,7 +371,7 @@ class BasicLayer(nn.Module):
         # patch merging layer
         if downsample is not None:
             if downsample==ClusterMerging:
-                self.downsample = downsample(dim=dim, keep_num = int(math.ceil(self.cluster_size / 4)), norm_layer=norm_layer)
+                self.downsample = downsample(dim=dim, norm_layer=norm_layer)
             else:
                 self.downsample = downsample(dim=dim, norm_layer=norm_layer)
         else:
