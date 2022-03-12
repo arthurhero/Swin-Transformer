@@ -204,7 +204,7 @@ class PatchMerging(nn.Module):
     def __init__(self, dim, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
-        self.norm = norm_layer(dim)
+        self.norm = norm_layer(4 * dim)
         self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
 
     def forward(self, pos, feat, mask=None):
@@ -225,7 +225,6 @@ class PatchMerging(nn.Module):
         w = (torch.ceil(max_x / 2.0)*2).long().item()
         feat = points2img(pos, feat, h, w) # b x c x h x w
         x = feat
-        x = self.norm(x.permute(0,2,3,1)).permute(0,3,1,2)
         if mask is not None:
             mask = points2img(pos, mask, h, w) # b x 1 x h x w
             x = x * mask
@@ -235,6 +234,7 @@ class PatchMerging(nn.Module):
         x2 = x[:,:, 0::2, 1::2]
         x3 = x[:,:, 1::2, 1::2]
         x = torch.cat([x0, x1, x2, x3], 1).permute(0,2,3,1)  # b x h x w x 4*c
+        x = self.norm(x)
 
         x = self.reduction(x).permute(0,3,1,2)
         _,c,h,w = x.shape
