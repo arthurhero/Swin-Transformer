@@ -228,7 +228,7 @@ class PatchMerging(nn.Module):
         x = self.norm(x.permute(0,2,3,1)).permute(0,3,1,2)
         if mask is not None:
             mask = points2img(pos, mask, h, w) # b x 1 x h x w
-            feat = feat * mask
+            x = x * mask
 
         x0 = x[:,:, 0::2, 0::2]
         x1 = x[:,:, 1::2, 0::2]
