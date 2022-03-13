@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from .pointconv_utils import points2img, kmeans_keops, cluster2points, points2cluster
+from .pointconv_utils import points2img, kmeans_keops, cluster2points, points2cluster, knn_keops
 import torch_scatter
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
@@ -216,46 +216,26 @@ class PatchMerging(nn.Module):
         feat - b x c x n
         mask - b x 1 x n
         """
-        #assert mask is None, "irregular image should not call patch merge"
         b,c,n = feat.shape
-        max_x = pos[:,0].max()+1
-        max_y = pos[:,1].max()+1
-        h = (torch.ceil(max_y / 2.0)*2).long().item() # make sure the number is even
-        w = (torch.ceil(max_x / 2.0)*2).long().item()
-        feat = points2img(pos, feat, h, w) # b x c x h x w
-        x = feat
-        if mask is not None:
-            mask = points2img(pos, mask, h, w) # b x 1 x h x w
-            x = x * mask
+        m = 4
+        k = int(math.ceil(n / m))
 
-        x0 = x[:,:, 0::2, 0::2]
-        x1 = x[:,:, 1::2, 0::2]
-        x2 = x[:,:, 0::2, 1::2]
-        x3 = x[:,:, 1::2, 1::2]
-        x = torch.cat([x0, x1, x2, x3], 1).permute(0,2,3,1)  # b x h x w x 4*c
+        # sample seed points
+        rand_idx = torch.randperm(n)[:k]
+        pos_sampled = pos[:,:,rand_idx].clone() # b x d x k
+        if mask is not None:
+            mask_sampled = mask[:,:,rand_idx].clone() # b x 1 x k
+        else:
+            mask_sampled = None
+        nn_idx = knn_keops(pos_sampled, pos, m, mask=mask) # b x 4 x k, gather 4 neighbors
+        nn_feat = gather_nd(feat, nn_idx) # b x c x 4 x k
+        x = nn_feat.permute(0,3,2,1).reshape(b,k,m*c)
+
         x = self.norm(x)
+        x = self.reduction(x)
+        x = x.permute(0,2,1) # b x 2c x k
 
-        x = self.reduction(x).permute(0,3,1,2)
-        _,c,h,w = x.shape
-
-        # create new pos tensor
-        pos = feat.new(b,2,h,w).zero_().long()
-        hs = torch.arange(0,h).long()
-        ws = torch.arange(0,w).long()
-        ys,xs = torch.meshgrid(hs,ws)
-        xs=xs.unsqueeze(0).expand(b,-1,-1)
-        ys=ys.unsqueeze(0).expand(b,-1,-1)
-        pos[:,0,:,:]=xs
-        pos[:,1,:,:]=ys
-
-        # mask
-        if mask is not None:
-            mask = nn.AdaptiveMaxPool2d((h,w))(mask.float())
-            mask = mask.view(b,1,-1)
-
-        x = x.view(b,c,-1)
-        pos = pos.view(b,2,-1)
-        return pos, x, mask
+        return pos_sampled, x, mask_sampled 
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}"

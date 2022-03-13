@@ -290,32 +290,33 @@ def knn(dist, k=20, ret_dist=False):
     else:
         return nn_idx
 
-def knn_keops(query, database, k, return_dist = False):
+def knn_keops(query, database, k, return_dist = False, mask=None):
     '''
     get knn using pykeops library
     query - b x c x n
     database - b x c x N
     k - scalar
+    mask - b x 1 x N
     return nn_dix - b x k x n
     '''
-    db_orig = database
-    q_orig = query
     from pykeops.torch import LazyTensor
-    query = query.permute(0,2,1).contiguous()
-    database = database.permute(0,2,1).contiguous()
+    query = query.float().permute(0,2,1).contiguous()
+    database = database.float().permute(0,2,1).contiguous()
+    b,n,c = query.shape
+    N = database.shape[1]
     query_ = LazyTensor(query[:,None,:,:])
     database_ = LazyTensor(database[:,:,None,:])
     dist = ((query_-database_) ** 2).sum(-1) # b x N x n
+    if mask is not None:
+        mask = mask.reshape(b,N,1).expand(-1,-1,n) # b x N x n
+        dist_max = dist.max()
+        mask_ = (1-mask) * dist_max + 1
+        dist = dist + mask_ 
     nn_idx = dist.argKmin(k, dim=1) # b x n x k
     nn_idx = nn_idx.permute(0,2,1).contiguous()
     if return_dist:
         nn_pos = gather_nd(db_orig, nn_idx) # b x 3 x k x n
         nn_dist = ((nn_pos-q_orig.unsqueeze(2))**2).sum(1) # b x k x n
-        '''
-        #nn_dist = dist.gather(dim=1,index=nn_idx) # b x k x n
-        nn_dist = dist.Kmin(k, dim=1) # b x n x k
-        nn_dist = nn_dist.permute(0,2,1).contiguous()
-        '''
         return nn_idx, nn_dist
     return nn_idx
 
