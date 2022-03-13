@@ -366,17 +366,15 @@ class BasicLayer(nn.Module):
             valid_row_idx = None
 
         if self.adads is not None:
-            cluster_mask2, avg_gsm_score = self.adads(cluster_feat, cluster_mask, b, self.k, valid_row_idx) # k x m x 1
-        else:
-            cluster_mask2 = cluster_mask
+            cluster_mask, avg_gsm_score = self.adads(cluster_feat, cluster_mask, b, self.k, valid_row_idx) # k x m x 1
 
         k = self.k
         for i_blk in range(len(self.blocks)):
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
-                cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask2)
+                cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask)
             else:
-                cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask2)
+                cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask)
 
         if self.k==1:
             new_pos = cluster_pos.permute(0,2,1)
