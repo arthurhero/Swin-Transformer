@@ -181,7 +181,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             samples, targets = mixup_fn(samples, targets)
 
         outputs, gsms = model(samples)
-        target_keep_ratio = 1/2.0
+        target_keep_ratio = 3/4.0
         ds_lambda = 10.0
 
         if config.TRAIN.ACCUMULATION_STEPS > 1:

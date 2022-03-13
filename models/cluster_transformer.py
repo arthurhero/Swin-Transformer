@@ -175,8 +175,10 @@ class ClusterTransformerBlock(nn.Module):
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
+        '''
         if mask is not None:
             x *= mask # make sure invalid points are 0
+            '''
 
         return x
 
@@ -275,7 +277,7 @@ class AdaptiveDownsample(nn.Module):
         self.dim = dim
         self.fc = nn.Linear(dim, dim // 2)
         self.act = nn.GELU()
-        self.ds = nn.Linear(dim, 2)
+        self.ds = nn.Linear(dim // 2, 2)
 
     def forward(self, feat, mask, b, real_k, valid_row_idx, tau=5.0):
         """
@@ -288,33 +290,6 @@ class AdaptiveDownsample(nn.Module):
         assert c == self.dim, "channel size does not accord"
         feat = self.act(self.fc(feat))
 
-        if valid_row_idx is not None:
-            feat_full = feat.new(b*real_k,m,c//2).zero_()
-            mask_full = feat.new(b*real_k,m,1).zero_()
-            feat_full[valid_row_idx] = feat
-            if mask is None:
-                mask_full[valid_row_idx] = 1
-            else:
-                mask_full[valid_row_idx] = mask.float()
-            feat_full = feat_full.reshape(b,real_k*m,c//2)
-            mask_full = mask_full.reshape(b,real_k*m,1)
-        else:
-            feat_full = feat.reshape(b,-1,c//2)
-            if mask is not None:
-                mask_full = mask.reshape(b,-1,1)
-            else:
-                mask_full = None
-
-        if mask_full is None:
-            feat_avg = feat_full.mean(1,keepdim=True)
-        else:
-            feat_avg = feat_full.sum(1,keepdim=True) / mask_full.sum(1,keepdim=True)
-        assert torch.isnan(feat_avg).any() == False, "feat_avg has nan!"
-        feat_avg = feat_avg.expand(-1,real_k*m,-1).reshape(-1,m,c//2)
-        if valid_row_idx is not None:
-            feat_avg = feat_avg[valid_row_idx]
-
-        feat = torch.cat([feat,feat_avg],dim=2) # k x m x c
         keep_prob = F.softmax(self.ds(feat),dim=-1) # k x m x 2
         logits = keep_prob.log() # k x m x 2
         gsm_score = F.gumbel_softmax(logits, tau = tau, hard = True, dim = 2)[:,:,0:1].clone() # k x m x 1, only get the result for keep
@@ -322,7 +297,7 @@ class AdaptiveDownsample(nn.Module):
             gsm_score = gsm_score * mask
             avg_gsm_score = gsm_score.sum() / mask.sum()
         else:
-            avg_gsm_score = gsm.mean()
+            avg_gsm_score = gsm_score.mean()
         return gsm_score, avg_gsm_score
 
 class BasicLayer(nn.Module):
@@ -411,15 +386,17 @@ class BasicLayer(nn.Module):
             valid_row_idx = None
 
         if self.adads is not None:
-            cluster_mask, avg_gsm_score = self.adads(cluster_feat, cluster_mask, b, self.k, valid_row_idx) # k x m x 1
+            cluster_mask2, avg_gsm_score = self.adads(cluster_feat, cluster_mask, b, self.k, valid_row_idx) # k x m x 1
+        else:
+            cluster_mask2 = cluster_mask
 
         k = self.k
         for i_blk in range(len(self.blocks)):
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
-                cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask)
+                cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask2)
             else:
-                cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask)
+                cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask2)
 
         if self.k==1:
             new_pos = cluster_pos.permute(0,2,1)
@@ -568,8 +545,8 @@ class ClusterTransformer(nn.Module):
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
                                downsample=downsample if (i_layer < self.num_layers - 1) else None,
-                               #adads=adads if (i_layer > 0) else None,
-                               adads=None,
+                               adads=adads if (i_layer > 0) else None,
+                               #adads=None,
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 
