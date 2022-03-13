@@ -536,19 +536,20 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
 
 
 def gather_nd(inputs, nn_idx):
-    """
-    input: (batch_size, num_dim, num_points)
-    nn_idx:(batch_size, k, num_points)
-    output:
-    output:(batch_size, num_dim, k, num_points)
-    """
-    b, c, _ = inputs.size()
-    _, k, n = nn_idx.size()
+    '''
+    inputs - b x c x N
+    nn_idx - b x k x n
+    return
+    output - b x c x k x n
+    '''
+    b, c, N = inputs.shape
+    _, k, n = nn_idx.shape
 
-    # (b, c, k*n)
-    nn_idx = nn_idx.unsqueeze(dim=1).expand(-1, c, -1, -1).view(b, c, -1)
-    inputs_gather = inputs.gather(dim=-1, index=nn_idx)
-    inputs_gather = inputs_gather.view(b, c, k, n)
+    batch_idx = torch.arange(b,device=inputs.device).unsqueeze(1).expand(-1,k*n).reshape(-1) # b*k*n
+    nn_idx = nn_idx.reshape(-1)
+    comb_idx = batch_idx * N + nn_idx
+    inputs_gather = inputs.permute(0,2,1).reshape(-1,c)[comb_idx]
+    inputs_gather = inputs_gather.reshape(b,k,n,c).permute(0,3,1,2) # b x c x k x n
     return inputs_gather
 
 def get_inverse_density(pc_pos,k,sigma):
