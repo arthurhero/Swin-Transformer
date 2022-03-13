@@ -95,13 +95,10 @@ class ClusterAttention(nn.Module):
 
         attn = attn + pos_bias 
         if mask is not None:
-            mask = mask.permute(0,2,1).unsqueeze(2).expand(-1,-1,m,-1) # k x 1 x m x m
-            mask = (mask + torch.eye(m,device = mask.device, dtype = mask.dtype)).clamp(max=1) # self-loop
-            attn_exp = attn.exp()
-            attn_exp = attn_exp * mask
-            attn = attn_exp / attn_exp.sum(-1,keepdim=True)
-        else:
-            attn = self.softmax(attn)
+            mask = mask.permute(0,2,1).unsqueeze(2) # k x 1 x 1 x m
+            mask = (1-mask)*(-100) # 1->0, 0->-100
+            attn = attn + mask
+        attn = self.softmax(attn)
 
         attn = self.attn_drop(attn)
 
@@ -251,11 +248,7 @@ class PatchMerging(nn.Module):
 
         # mask
         if mask is not None:
-            mask_avg = nn.AdaptiveAvgPool2d((h,w))(mask.float())
-            x = x / (mask_avg+1e-8)
             mask = nn.AdaptiveMaxPool2d((h,w))(mask.float())
-            x = x * mask
-            assert torch.isnan(x).any() == False, "x has nan in patch merging!"
             mask = mask.view(b,1,-1)
 
         x = x.view(b,c,-1)
