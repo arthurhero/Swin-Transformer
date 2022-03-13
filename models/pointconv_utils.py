@@ -302,16 +302,14 @@ def knn_keops(query, database, k, return_dist = False, mask=None):
     from pykeops.torch import LazyTensor
     query = query.float().permute(0,2,1).contiguous()
     database = database.float().permute(0,2,1).contiguous()
+    if mask is not None:
+        mask = mask.float().permute(0,2,1)
+        database += (1-mask) * 1000
     b,n,c = query.shape
     N = database.shape[1]
     query_ = LazyTensor(query[:,None,:,:])
     database_ = LazyTensor(database[:,:,None,:])
     dist = ((query_-database_) ** 2).sum(-1) # b x N x n
-    if mask is not None:
-        mask = mask.reshape(b,N,1).expand(-1,-1,n) # b x N x n
-        dist_max = dist.max()
-        mask_ = (1-mask) * dist_max + 1
-        dist = dist + mask_ 
     nn_idx = dist.argKmin(k, dim=1) # b x n x k
     nn_idx = nn_idx.permute(0,2,1).contiguous()
     if return_dist:
