@@ -189,7 +189,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             loss = loss / config.TRAIN.ACCUMULATION_STEPS
             ds_loss = loss.new(1,).zero_()
             for gsm in gsms:
-                ds_loss += (gsm-target_keep_ratio).pow(2)
+                ds_loss += gsm
             ds_loss = ds_loss / config.TRAIN.ACCUMULATION_STEPS
             total_loss = loss + ds_lambda * ds_loss
             if config.AMP_OPT_LEVEL != "O0":
@@ -213,7 +213,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             loss = criterion(outputs, targets)
             ds_loss = loss.new(1,).zero_()
             for gsm in gsms:
-                ds_loss += (gsm-target_keep_ratio).pow(2)
+                ds_loss += gsm
             total_loss = loss + ds_lambda * ds_loss
             optimizer.zero_grad()
             if config.AMP_OPT_LEVEL != "O0":

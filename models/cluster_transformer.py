@@ -304,7 +304,7 @@ class AdaptiveDownsample(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
-        self.fc = nn.Linear(dim, dim // 2)
+        self.fc = nn.Linear(dim+1, dim // 2)
         self.act = nn.GELU()
         self.ds = nn.Linear(dim // 2, 1)
 
@@ -322,26 +322,20 @@ class AdaptiveDownsample(nn.Module):
             count = mask.sum(1) # k x 1
         else:
             count = torch.zeros(k,1,device=feat.device,dtype=feat.dtyep) + m
-        target_prob = cluster_size / count # k x 1
-
-        prob = torch.sigmoid(self.ds(self.act(self.fc(feat)))) # k x m x 1
+        assert count.min() > 0, "count has 0"
+        target_prob = (cluster_size / count).clamp(max=1-1e-5).detach() # k x 1
+        x = self.act(self.fc(torch.cat([feat,(1/count).unsqueeze(1).expand(-1,m,-1)],dim=-1)))
+        prob = torch.sigmoid(self.ds(x)) # k x m x 1
         if mask is not None:
             avg_prob = (prob*mask).sum(1) / count # k x 1
         else:
             avg_prob = prob.sum(1) / count # k x 1
-        prob = prob * target_prob.unsqueeze(2) / avg_prob.unsqueeze(2)
-        assert torch.isnan(prob).any() == False, "nan in prob!"
-        assert torch.isinf(prob).any() == False, "inf in prob!"
-        prob = prob.clamp(max=1-1e-5)
-
+        prob_loss = (avg_prob - target_prob).pow(2).mean()
         logits = torch.cat([prob,1-prob],dim=2).log() # k x m x 2
-        assert torch.isnan(logits).any() == False, "logits in prob!"
-        assert torch.isinf(logits).any() == False, "logits in prob!"
-
         gsm_score = F.gumbel_softmax(logits, tau = tau, hard = True, dim = 2)[:,:,0:1].clone() # k x m x 1, only get the result for keep
         if mask is not None:
             gsm_score = gsm_score * mask
-        return gsm_score
+        return gsm_score, prob_loss
 
 class BasicLayer(nn.Module):
     """ A basic cluster Transformer layer for one stage.
@@ -429,7 +423,7 @@ class BasicLayer(nn.Module):
             valid_row_idx = None
 
         if self.adads is not None and self.k > 1:
-            cluster_mask = self.adads(cluster_feat, cluster_mask, self.cluster_size) # k x m x 1
+            cluster_mask, prob_loss = self.adads(cluster_feat, cluster_mask, self.cluster_size) # k x m x 1
 
         k = self.k
         for i_blk in range(len(self.blocks)):
@@ -446,9 +440,9 @@ class BasicLayer(nn.Module):
         else:
             # convert back to batches
             '''
+            '''
             if cluster_mask is not None:
                 cluster_mask = cluster_mask.detach()
-                '''
             new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k, filter_invalid=True)
             '''
             if new_mask is not None:
@@ -457,7 +451,10 @@ class BasicLayer(nn.Module):
                 '''
         if self.downsample is not None:
             new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
-        return new_pos, new_feat, new_mask
+        if self.adads is not None:
+            return new_pos, new_feat, new_mask, prob_loss
+        else:
+            return new_pos, new_feat, new_mask
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, depth={self.depth}"
@@ -629,8 +626,8 @@ class ClusterTransformer(nn.Module):
             if len(ret) == 3:
                 pos, x, mask = ret
             else:
-                pos, x, mask, avg_gsm_score = ret
-                gsms.append(avg_gsm_score)
+                pos, x, mask, prob_loss= ret
+                gsms.append(prob_loss)
 
         x = self.norm(x.permute(0,2,1)) # b x n x c
         x = self.avgpool(x.transpose(1, 2))  # b x c x 1
