@@ -96,6 +96,12 @@ class ClusterAttention(nn.Module):
         attn = attn + pos_bias 
         if mask is not None:
             mask = mask.permute(0,2,1).unsqueeze(2) # k x 1 x 1 x m
+            '''
+            mask = (mask.expand(-1,-1,m,-1) + torch.eye(m,device=mask.device,dtyep=mask.dtype))
+            mask = mask - (mask==2).to(mask.dtype)
+            assert mask.max()==1 and mask.min==0, "not only 0 and 1 in mask"
+            '''
+            assert mask.sum(-1).sum(-1).min()==1, "there should be 1 in every cluster!"
             mask = (1-mask)*(-100) # 1->0, 0->-100
             attn = attn + mask
         attn = self.softmax(attn)
@@ -216,27 +222,12 @@ class PatchMerging(nn.Module):
         feat - b x c x n
         mask - b x 1 x n
         """
-        
+        '''
         b,c,n = feat.shape
-        d = pos.shape[1]
         m = 4
         k = int(math.ceil(n / m))
 
-        '''
-        max_x = pos[:,0].max()+1
-        max_y = pos[:,1].max()+1
-        h = (torch.ceil(max_y / 2.0)*2).long().item() # make sure the number is even
-        w = (torch.ceil(max_x / 2.0)*2).long().item()
-        idx = torch.arange(n, device=feat.device).unsqueeze(0).expand(b,-1).unsqueeze(1) # b x 1 x n
-        idx = points2img(pos, idx, h, w) # b x 1 x h x w
-        idx = idx[:,:,::2,::2].clone().reshape(b,1,-1) # b x 1 x k
-
-        pos_sampled = pos.gather(dim=-1,index=idx.expand(-1,d,-1)) # b x d x k
-        if mask is not None:
-            mask_sampled = mask.gather(dim=-1,index=idx) # b x 1 x k
-        else:
-            mask_sampled = None
-        '''
+        # sample seed points
         rand_idx = torch.randperm(n)[:k]
         pos_sampled = pos[:,:,rand_idx].clone() # b x d x k
         if mask is not None:
@@ -244,7 +235,6 @@ class PatchMerging(nn.Module):
         else:
             mask_sampled = None
         nn_idx = knn_keops(pos_sampled, pos, m, mask=mask) # b x 4 x k, gather 4 neighbors
-        print("nn_idx len",n,len(nn_idx[0].view(-1).unique()))
         nn_feat = gather_nd(feat, nn_idx) # b x c x 4 x k
         x = nn_feat.permute(0,3,2,1).reshape(b,k,m*c)
 
@@ -252,9 +242,9 @@ class PatchMerging(nn.Module):
         x = self.reduction(x)
         x = x.permute(0,2,1) # b x 2c x k
 
-        return pos_sampled // 2, x, mask_sampled 
+        return pos_sampled, x, mask_sampled
         '''
-        #assert mask is None, "irregular image should not call patch merge"
+        
         b,c,n = feat.shape
         max_x = pos[:,0].max()+1
         max_y = pos[:,1].max()+1
@@ -294,7 +284,6 @@ class PatchMerging(nn.Module):
             mask = mask.view(b,1,-1)
 
         return pos, x, mask
-        '''
 
 
     def extra_repr(self) -> str:
@@ -317,9 +306,9 @@ class AdaptiveDownsample(nn.Module):
         self.dim = dim
         self.fc = nn.Linear(dim, dim // 2)
         self.act = nn.GELU()
-        self.ds = nn.Linear(dim // 2, 2)
+        self.ds = nn.Linear(dim // 2, 1)
 
-    def forward(self, feat, mask, b, real_k, valid_row_idx, tau=5.0):
+    def forward(self, feat, mask, cluster_size, tau=5.0):
         """
         feat - k x m x c
         mask - k x m x 1
@@ -328,17 +317,28 @@ class AdaptiveDownsample(nn.Module):
         """
         k,m,c = feat.shape
         assert c == self.dim, "channel size does not accord"
-        feat = self.act(self.fc(feat))
 
-        keep_prob = F.softmax(self.ds(feat),dim=-1) # k x m x 2
-        logits = keep_prob.log() # k x m x 2
+        if mask is not None:
+            count = mask.sum(1) # k x 1
+        else:
+            count = torch.zeros(k,1,device=feat.device,dtype=feat.dtyep) + m
+        target_prob = cluster_size / count # k x 1
+
+        prob = torch.sigmoid(self.ds(self.act(self.fc(feat)))) # k x m x 1
+        avg_prob = prob.sum(1) / count # k x 1
+        prob = prob * target_prob.unsqueeze(2) / avg_prob.unsqueeze(2)
+        assert torch.isnan(prob).any() == False, "nan in prob!"
+        assert torch.isinf(prob).any() == False, "inf in prob!"
+        prob = prob.clamp(max=1-1e-5)
+
+        logits = torch.cat([prob,1-prob],dim=2).log() # k x m x 2
+        assert torch.isnan(logits).any() == False, "logits in prob!"
+        assert torch.isinf(logits).any() == False, "logits in prob!"
+
         gsm_score = F.gumbel_softmax(logits, tau = tau, hard = True, dim = 2)[:,:,0:1].clone() # k x m x 1, only get the result for keep
         if mask is not None:
             gsm_score = gsm_score * mask
-            avg_gsm_score = gsm_score.sum() / mask.sum()
-        else:
-            avg_gsm_score = gsm_score.mean()
-        return gsm_score, avg_gsm_score
+        return gsm_score
 
 class BasicLayer(nn.Module):
     """ A basic cluster Transformer layer for one stage.
@@ -425,8 +425,8 @@ class BasicLayer(nn.Module):
                 cluster_mask = mask.permute(0,2,1)
             valid_row_idx = None
 
-        if self.adads is not None:
-            cluster_mask, avg_gsm_score = self.adads(cluster_feat, cluster_mask, b, self.k, valid_row_idx) # k x m x 1
+        if self.adads is not None and self.k > 1:
+            cluster_mask = self.adads(cluster_feat, cluster_mask, self.cluster_size) # k x m x 1
 
         k = self.k
         for i_blk in range(len(self.blocks)):
@@ -442,18 +442,16 @@ class BasicLayer(nn.Module):
             new_mask = mask
         else:
             # convert back to batches
+            cluster_mask = cluster_mask.detach()
             new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k, filter_invalid=True)
             '''
             if new_mask is not None:
                 print('min kept point ratio before ds',new_mask.sum(-1).min() / n)
                 print('avg kept point ratio before ds',new_mask.sum() / (b*n))
                 '''
-        if self.downsample is not None and isinstance(self.downsample, PatchMerging):
+        if self.downsample is not None:
             new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
-        if self.adads is None:
-            return new_pos, new_feat, new_mask
-        else:
-            return new_pos, new_feat, new_mask, avg_gsm_score
+        return new_pos, new_feat, new_mask
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, depth={self.depth}"
@@ -584,7 +582,7 @@ class ClusterTransformer(nn.Module):
                                norm_layer=norm_layer,
                                downsample=downsample if (i_layer < self.num_layers - 1) else None,
                                #adads=adads if (i_layer > 0) else None,
-                               adads=None,
+                               adads=adads,
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 
