@@ -180,7 +180,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        outputs, gsms = model(samples)
+        outputs, gsms = model(samples.to(torch.float32))
         target_keep_ratio = 3/4.0
         ds_lambda = 10.0
 
@@ -284,7 +284,7 @@ def validate(config, data_loader, model):
         #images = F.interpolate(images, size=88, mode = 'bicubic')
 
         # compute output
-        output, _ = model(images)
+        output, _ = model(images.to(torch.float32))
 
         # measure accuracy and record loss
         loss = criterion(output, target)

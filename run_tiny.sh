@@ -13,6 +13,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 WORLD_SIZE=$NUM_PROC python -m torch.distributed.la
     main.py --cfg $CONFIG_FILE \
     --data-path $DATA_PATH \
     --batch-size 1024 \
-#    --amp-opt-level O0 \
+    --amp-opt-level O0 \
 #    --eval
 #    --throughput

@@ -101,7 +101,7 @@ class ClusterAttention(nn.Module):
             mask = mask - (mask==2).to(mask.dtype)
             assert mask.max()==1 and mask.min==0, "not only 0 and 1 in mask"
             '''
-            assert mask.sum(-1).sum(-1).min()==1, "there should be 1 in every cluster!"
+            assert mask.sum(-1).sum(-1).min()>0, "there should be 1 in every cluster!"
             mask = (1-mask)*(-100) # 1->0, 0->-100
             attn = attn + mask
         attn = self.softmax(attn)
@@ -325,7 +325,10 @@ class AdaptiveDownsample(nn.Module):
         target_prob = cluster_size / count # k x 1
 
         prob = torch.sigmoid(self.ds(self.act(self.fc(feat)))) # k x m x 1
-        avg_prob = prob.sum(1) / count # k x 1
+        if mask is not None:
+            avg_prob = (prob*mask).sum(1) / count # k x 1
+        else:
+            avg_prob = prob.sum(1) / count # k x 1
         prob = prob * target_prob.unsqueeze(2) / avg_prob.unsqueeze(2)
         assert torch.isnan(prob).any() == False, "nan in prob!"
         assert torch.isinf(prob).any() == False, "inf in prob!"
@@ -442,7 +445,10 @@ class BasicLayer(nn.Module):
             new_mask = mask
         else:
             # convert back to batches
-            cluster_mask = cluster_mask.detach()
+            '''
+            if cluster_mask is not None:
+                cluster_mask = cluster_mask.detach()
+                '''
             new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k, filter_invalid=True)
             '''
             if new_mask is not None:
