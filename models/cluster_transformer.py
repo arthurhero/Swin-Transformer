@@ -97,10 +97,10 @@ class ClusterAttention(nn.Module):
         if mask is not None:
             mask = mask.permute(0,2,1).unsqueeze(2) # k x 1 x 1 x m
             '''
-            mask = (mask.expand(-1,-1,m,-1) + torch.eye(m,device=mask.device,dtyep=mask.dtype))
-            mask = mask - (mask==2).to(mask.dtype)
-            assert mask.max()==1 and mask.min==0, "not only 0 and 1 in mask"
             '''
+            mask = (mask.expand(-1,-1,m,-1) + torch.eye(m,device=mask.device,dtype=mask.dtype))
+            mask = mask - (mask==2).to(mask.dtype)
+            assert mask.max()<=1 and mask.min()>=0, "not only 0 and 1 in mask"
             assert mask.sum(-1).sum(-1).min()>0, "there should be 1 in every cluster!"
             mask = (1-mask)*(-100) # 1->0, 0->-100
             attn = attn + mask
@@ -304,6 +304,7 @@ class AdaptiveDownsample(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
+        self.norm = nn.LayerNorm(dim)
         self.fc = nn.Linear(dim+1, dim // 2)
         self.act = nn.GELU()
         self.ds = nn.Linear(dim // 2, 1)
@@ -321,21 +322,42 @@ class AdaptiveDownsample(nn.Module):
         if mask is not None:
             count = mask.sum(1) # k x 1
         else:
-            count = torch.zeros(k,1,device=feat.device,dtype=feat.dtyep) + m
+            count = torch.zeros(k,1,device=feat.device,dtype=feat.dtype) + m
         assert count.min() > 0, "count has 0"
-        target_prob = (cluster_size / count).clamp(max=1-1e-5).detach() # k x 1
-        x = self.act(self.fc(torch.cat([feat,(1/count).unsqueeze(1).expand(-1,m,-1)],dim=-1)))
-        prob = torch.sigmoid(self.ds(x)) # k x m x 1
-        if mask is not None:
-            avg_prob = (prob*mask).sum(1) / count # k x 1
-        else:
-            avg_prob = prob.sum(1) / count # k x 1
+        large_cluster_idx = (count.view(-1) > cluster_size).nonzero().view(-1) # z
+        if len(large_cluster_idx) == 0:
+            #print("no large cluster!!!!!!")
+            return mask, 0
+
+        count = count[large_cluster_idx].clone()
+        assert mask is not None, "mask should not be none"
+        target_prob = (cluster_size / count).detach() # z x 1
+        assert target_prob.max() < 1.0, "target prob must < 1.0"
+        assert torch.isnan(target_prob).any()==False, "target prob nan"
+        assert torch.isinf(target_prob).any()==False, "target prob inf"
+        large_feat = feat[large_cluster_idx].clone() # z x m x c
+        large_feat = self.norm(large_feat)
+        prob = torch.sigmoid(self.ds(self.act(self.fc(torch.cat([large_feat,(1/count).unsqueeze(1).expand(-1,m,-1)],dim=-1))))) # z x m x 1
+        assert torch.isnan(prob).any()==False, "prob nan"
+        assert torch.isinf(prob).any()==False, "prob inf"
+        avg_prob = (prob*mask[large_cluster_idx]).sum(1) / count # z x 1
+        assert torch.isnan(avg_prob).any()==False, "avg prob nan"
+        assert torch.isinf(avg_prob).any()==False, "avg prob inf"
         prob_loss = (avg_prob - target_prob).pow(2).mean()
-        logits = torch.cat([prob,1-prob],dim=2).log() # k x m x 2
-        gsm_score = F.gumbel_softmax(logits, tau = tau, hard = True, dim = 2)[:,:,0:1].clone() # k x m x 1, only get the result for keep
-        if mask is not None:
-            gsm_score = gsm_score * mask
-        return gsm_score, prob_loss
+        assert torch.isnan(prob_loss).any()==False, "prob loss nan"
+        assert torch.isinf(prob_loss).any()==False, "prob loss inf"
+        logits = torch.cat([prob,1-prob],dim=2).log() # z x m x 2
+        assert torch.isnan(logits).any()==False, "logits nan"
+        assert torch.isinf(logits).any()==False, "logits inf"
+        gsm_score = F.gumbel_softmax(logits, tau = tau, hard = True, dim = 2)[:,:,0:1].clone() # z x m x 1, only get the result for keep
+        assert torch.isnan(gsm_score).any()==False, "gsm nan"
+        assert torch.isinf(gsm_score).any()==False, "gsm inf"
+        new_mask = mask.clone().to(gsm_score.dtype)
+        new_mask[large_cluster_idx] = gsm_score
+        new_mask = new_mask * mask
+        assert torch.isnan(new_mask).any()==False, "gsm 2 nan"
+        assert torch.isinf(new_mask).any()==False, "gsm 2 inf"
+        return new_mask, prob_loss
 
 class BasicLayer(nn.Module):
     """ A basic cluster Transformer layer for one stage.
@@ -404,6 +426,8 @@ class BasicLayer(nn.Module):
         mask - b x 1 x n
         '''
         b,d,n = pos.shape
+        assert torch.isnan(feat).any()==False, "feat 1 nan "+str(n) 
+        assert torch.isinf(feat).any()==False, "feat 1 inf "+str(n) 
         c = feat.shape[1]
         if self.k == 0 or self.cluster_size != 0:
             self.k = int(math.ceil(n / float(self.cluster_size)))
@@ -422,6 +446,9 @@ class BasicLayer(nn.Module):
                 cluster_mask = mask.permute(0,2,1)
             valid_row_idx = None
 
+        assert torch.isnan(feat).any()==False, "feat 2 nan"
+        assert torch.isinf(feat).any()==False, "feat 2 inf"
+
         if self.adads is not None and self.k > 1:
             cluster_mask, prob_loss = self.adads(cluster_feat, cluster_mask, self.cluster_size) # k x m x 1
 
@@ -432,6 +459,8 @@ class BasicLayer(nn.Module):
                 cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask)
             else:
                 cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask)
+        assert torch.isnan(feat).any()==False, "feat 3 nan"
+        assert torch.isinf(feat).any()==False, "feat 3 inf"
 
         if self.k==1:
             new_pos = cluster_pos.permute(0,2,1)
@@ -451,6 +480,8 @@ class BasicLayer(nn.Module):
                 '''
         if self.downsample is not None:
             new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
+        assert torch.isnan(feat).any()==False, "feat 4 nan"
+        assert torch.isinf(feat).any()==False, "feat 4 inf"
         if self.adads is not None:
             return new_pos, new_feat, new_mask, prob_loss
         else:
@@ -482,7 +513,8 @@ class PatchEmbed(nn.Module):
         self.in_chans = in_chans
         self.embed_dim = embed_dim
 
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        #self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=3, stride=1, padding=1)
         if norm_layer is not None:
             self.norm = norm_layer(embed_dim)
         else:
@@ -491,9 +523,19 @@ class PatchEmbed(nn.Module):
     def forward(self, x):
         b,c,h,w = x.shape
 
+        assert torch.isnan(x).any()==False, "feat 0 nan" 
+        assert torch.isinf(x).any()==False, "feat 0 inf" 
         x = self.proj(x).flatten(2).transpose(1, 2)  # b x n x c
+        assert torch.isnan(self.proj.weight).any()==False, "weight nan"
+        assert torch.isinf(self.proj.weight).any()==False, "weight inf"
+        assert torch.isnan(self.proj.bias).any()==False, "bias nan"
+        assert torch.isinf(self.proj.bias).any()==False, "bias inf"
+        assert torch.isnan(x).any()==False, "feat 00 nan"
+        assert torch.isinf(x).any()==False, "feat 00 inf"
         if self.norm is not None:
             x = self.norm(x)
+        assert torch.isnan(x).any()==False, "feat 000 nan"
+        assert torch.isinf(x).any()==False, "feat 000 inf"
         x = x.transpose(1, 2) # b x c x n
 
         pos = x.new(b,2,h,w).zero_().long()
@@ -629,8 +671,12 @@ class ClusterTransformer(nn.Module):
                 pos, x, mask, prob_loss= ret
                 gsms.append(prob_loss)
 
+        assert torch.isnan(x).any()==False, "feat after layers nan"
+        assert torch.isinf(x).any()==False, "feat after layers inf"
         x = self.norm(x.permute(0,2,1)) # b x n x c
         x = self.avgpool(x.transpose(1, 2))  # b x c x 1
+        assert torch.isnan(x).any()==False, "feat after pool nan"
+        assert torch.isinf(x).any()==False, "feat after pool inf"
         x = torch.flatten(x, 1)
         return x, gsms 
 

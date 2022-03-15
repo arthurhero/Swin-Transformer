@@ -90,7 +90,7 @@ def main(config):
     optimizer = build_optimizer(config, model)
     if config.AMP_OPT_LEVEL != "O0":
         model, optimizer = amp.initialize(model, optimizer, opt_level=config.AMP_OPT_LEVEL)
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[config.LOCAL_RANK], broadcast_buffers=False)
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[config.LOCAL_RANK], broadcast_buffers=False, find_unused_parameters=True)
     model_without_ddp = model.module
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -180,7 +180,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        outputs, gsms = model(samples.to(torch.float32))
+        outputs, gsms = model(samples)
         target_keep_ratio = 3/4.0
         ds_lambda = 10.0
 
@@ -284,7 +284,7 @@ def validate(config, data_loader, model):
         #images = F.interpolate(images, size=88, mode = 'bicubic')
 
         # compute output
-        output, _ = model(images.to(torch.float32))
+        output, _ = model(images)
 
         # measure accuracy and record loss
         loss = criterion(output, target)
