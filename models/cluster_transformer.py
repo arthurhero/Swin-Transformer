@@ -307,7 +307,7 @@ class AdaptiveDownsample(nn.Module):
         self.norm = nn.LayerNorm(dim)
         self.fc = nn.Linear(dim+1, dim // 2)
         self.act = nn.GELU()
-        self.ds = nn.Linear(dim // 2, 1)
+        self.ds = nn.Linear(dim // 2, 2)
 
     def forward(self, feat, mask, cluster_size, tau=5.0):
         """
@@ -337,7 +337,10 @@ class AdaptiveDownsample(nn.Module):
         assert torch.isinf(target_prob).any()==False, "target prob inf"
         large_feat = feat[large_cluster_idx].clone() # z x m x c
         large_feat = self.norm(large_feat)
-        prob = torch.sigmoid(self.ds(self.act(self.fc(torch.cat([large_feat,(1/count).unsqueeze(1).expand(-1,m,-1)],dim=-1))))) # z x m x 1
+        logits = self.ds(self.act(self.fc(torch.cat([large_feat,(1/count).unsqueeze(1).expand(-1,m,-1)],dim=-1)))) # z x m x 2
+        assert torch.isnan(logits).any()==False, "logits nan"
+        assert torch.isinf(logits).any()==False, "logits inf"
+        prob = F.softmax(logits, dim=-1)[:,:,0:1].clone() # z x m x 1
         assert torch.isnan(prob).any()==False, "prob nan"
         assert torch.isinf(prob).any()==False, "prob inf"
         avg_prob = (prob*mask[large_cluster_idx]).sum(1) / count # z x 1
@@ -346,9 +349,6 @@ class AdaptiveDownsample(nn.Module):
         prob_loss = (avg_prob - target_prob).pow(2).mean()
         assert torch.isnan(prob_loss).any()==False, "prob loss nan"
         assert torch.isinf(prob_loss).any()==False, "prob loss inf"
-        logits = torch.cat([prob,1-prob],dim=2).log() # z x m x 2
-        assert torch.isnan(logits).any()==False, "logits nan"
-        assert torch.isinf(logits).any()==False, "logits inf"
         gsm_score = F.gumbel_softmax(logits, tau = tau, hard = True, dim = 2)[:,:,0:1].clone() # z x m x 1, only get the result for keep
         assert torch.isnan(gsm_score).any()==False, "gsm nan"
         assert torch.isinf(gsm_score).any()==False, "gsm inf"
@@ -626,8 +626,8 @@ class ClusterTransformer(nn.Module):
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
                                downsample=downsample if (i_layer < self.num_layers - 1) else None,
-                               #adads=adads if (i_layer > 0) else None,
                                adads=adads,
+                               #adads=None,
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 
