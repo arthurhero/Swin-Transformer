@@ -626,8 +626,8 @@ class ClusterTransformer(nn.Module):
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
                                downsample=downsample if (i_layer < self.num_layers - 1) else None,
-                               adads=adads,
-                               #adads=None,
+                               #adads=adads,
+                               adads=None,
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 
