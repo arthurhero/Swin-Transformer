@@ -71,7 +71,7 @@ class ClusterAttention(nn.Module):
     def forward(self, pos, feat, mask):
         """
         Args:
-            pos - k x m x 2, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
+            pos - k x m x d, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
             feat - k x m x c, the features of points
             mask - k x m x 1, the binary mask indicating valid points
         """
@@ -181,11 +181,6 @@ class ClusterTransformerBlock(nn.Module):
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
-        '''
-        if mask is not None:
-            x *= mask # make sure invalid points are 0
-            '''
-
         return x
 
     def extra_repr(self) -> str:
@@ -214,40 +209,17 @@ class PatchMerging(nn.Module):
 
     def forward(self, pos, feat, mask=None):
         """
-        pos - b x 2 x n
-        feat - b x c x n
-        mask - b x 1 x n
+        pos - b x n x 2
+        feat - b x n x c
+        mask - b x n x 1
         return
-        pos - b x 2 x n
-        feat - b x c x n
-        mask - b x 1 x n
+        pos - b x n x 2
+        feat - b x n x c
+        mask - b x n x 1
         """
-        '''
-        b,c,n = feat.shape
-        m = 4
-        k = int(math.ceil(n / m))
-
-        # sample seed points
-        rand_idx = torch.randperm(n)[:k]
-        pos_sampled = pos[:,:,rand_idx].clone() # b x d x k
-        if mask is not None:
-            mask_sampled = mask[:,:,rand_idx].clone() # b x 1 x k
-        else:
-            mask_sampled = None
-        nn_idx = knn_keops(pos_sampled, pos, m, mask=mask) # b x 4 x k, gather 4 neighbors
-        nn_feat = gather_nd(feat, nn_idx) # b x c x 4 x k
-        x = nn_feat.permute(0,3,2,1).reshape(b,k,m*c)
-
-        x = self.norm(x)
-        x = self.reduction(x)
-        x = x.permute(0,2,1) # b x 2c x k
-
-        return pos_sampled, x, mask_sampled
-        '''
-        
-        b,c,n = feat.shape
-        max_x = pos[:,0].max()+1
-        max_y = pos[:,1].max()+1
+        b,n,c = feat.shape
+        max_x = pos[:,:,0].max()+1
+        max_y = pos[:,:,1].max()+1
         h = (torch.ceil(max_y / 2.0)*2).long().item() # make sure the number is even
         w = (torch.ceil(max_x / 2.0)*2).long().item()
         feat = points2img(pos, feat, h, w) # b x c x h x w
@@ -263,25 +235,25 @@ class PatchMerging(nn.Module):
         x = torch.cat([x0, x1, x2, x3], 1).permute(0,2,3,1)  # b x h x w x 4*c
 
         x = self.norm(x)
-        x = self.reduction(x).permute(0,3,1,2)
-        _,c,h,w = x.shape
-        x = x.view(b,c,-1)
+        x = self.reduction(x)
+        _,h,w,c = x.shape
+        x = x.view(b,-1,c)
 
         # create new pos tensor
-        pos = feat.new(b,2,h,w).zero_().long()
+        pos = feat.new(b,h,w,2).zero_().long()
         hs = torch.arange(0,h).long()
         ws = torch.arange(0,w).long()
         ys,xs = torch.meshgrid(hs,ws)
         xs=xs.unsqueeze(0).expand(b,-1,-1)
         ys=ys.unsqueeze(0).expand(b,-1,-1)
-        pos[:,0,:,:]=xs
-        pos[:,1,:,:]=ys
-        pos = pos.view(b,2,-1)
+        pos[:,:,:,0]=xs
+        pos[:,:,:,1]=ys
+        pos = pos.view(b,-1,2)
 
         # mask
         if mask is not None:
             mask = nn.AdaptiveMaxPool2d((h,w))(mask.float()).long()
-            mask = mask.view(b,1,-1)
+            mask = mask.view(b,-1).unsqueeze(2) # b x n x 1
 
         return pos, x, mask
 
@@ -421,29 +393,29 @@ class BasicLayer(nn.Module):
 
     def forward(self, pos, feat, mask=None):
         '''
-        pos - b x 2 x n
-        feat - b x c x n
-        mask - b x 1 x n
+        pos - b x n x d
+        feat - b x n x c
+        mask - b x n x 1
         '''
-        b,d,n = pos.shape
+        b,n,d = pos.shape
         assert torch.isnan(feat).any()==False, "feat 1 nan "+str(n) 
         assert torch.isinf(feat).any()==False, "feat 1 inf "+str(n) 
-        c = feat.shape[1]
-        if self.k == 0 or self.cluster_size != 0:
-            self.k = int(math.ceil(n / float(self.cluster_size)))
+        c = feat.shape[2]
+        assert = self.cluster_size > 0, 'self.cluster_size must be positive'
+        self.k = int(math.ceil(n / float(self.cluster_size)))
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                _, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random') # b x c x k, b x 1 x n, b x m x k, b x m x k
+                _, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random') # b x k x m, b x k x m
                 #print("keep ratio", cluster_mask.sum() / (b*n))
             cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(pos, feat, member_idx, cluster_mask, mask=mask)
         else:
-            cluster_pos = pos.permute(0,2,1)
-            cluster_feat = feat.permute(0,2,1)
+            cluster_pos = pos
+            cluster_feat = feat
             if mask is None:
                 cluster_mask = None 
             else:
-                cluster_mask = mask.permute(0,2,1)
+                cluster_mask = mask
             valid_row_idx = None
 
         assert torch.isnan(feat).any()==False, "feat 2 nan"
@@ -463,8 +435,8 @@ class BasicLayer(nn.Module):
         assert torch.isinf(feat).any()==False, "feat 3 inf"
 
         if self.k==1:
-            new_pos = cluster_pos.permute(0,2,1)
-            new_feat = cluster_feat.permute(0,2,1)
+            new_pos = cluster_pos
+            new_feat = cluster_feat
             new_mask = mask
         else:
             # convert back to batches
@@ -473,16 +445,11 @@ class BasicLayer(nn.Module):
             if cluster_mask is not None:
                 cluster_mask = cluster_mask.detach()
             new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k, filter_invalid=True)
-            '''
-            if new_mask is not None:
-                print('min kept point ratio before ds',new_mask.sum(-1).min() / n)
-                print('avg kept point ratio before ds',new_mask.sum() / (b*n))
-                '''
         if self.downsample is not None:
             new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
         assert torch.isnan(feat).any()==False, "feat 4 nan"
         assert torch.isinf(feat).any()==False, "feat 4 inf"
-        if self.adads is not None:
+        if self.adads is not None and self.k > 1:
             return new_pos, new_feat, new_mask, prob_loss
         else:
             return new_pos, new_feat, new_mask
@@ -523,30 +490,25 @@ class PatchEmbed(nn.Module):
     def forward(self, x):
         b,c,h,w = x.shape
 
-        assert torch.isnan(x).any()==False, "feat 0 nan" 
-        assert torch.isinf(x).any()==False, "feat 0 inf" 
         x = self.proj(x).flatten(2).transpose(1, 2)  # b x n x c
         assert torch.isnan(self.proj.weight).any()==False, "weight nan"
         assert torch.isinf(self.proj.weight).any()==False, "weight inf"
         assert torch.isnan(self.proj.bias).any()==False, "bias nan"
         assert torch.isinf(self.proj.bias).any()==False, "bias inf"
-        assert torch.isnan(x).any()==False, "feat 00 nan"
-        assert torch.isinf(x).any()==False, "feat 00 inf"
         if self.norm is not None:
             x = self.norm(x)
         assert torch.isnan(x).any()==False, "feat 000 nan"
         assert torch.isinf(x).any()==False, "feat 000 inf"
-        x = x.transpose(1, 2) # b x c x n
 
-        pos = x.new(b,2,h,w).zero_().long()
+        pos = x.new(b,h,w,2).zero_().long()
         hs = torch.arange(0,h).long()
         ws = torch.arange(0,w).long()
         ys,xs = torch.meshgrid(hs,ws)
         xs=xs.unsqueeze(0).expand(b,-1,-1)
         ys=ys.unsqueeze(0).expand(b,-1,-1)
-        pos[:,0]=xs
-        pos[:,1]=ys
-        pos = pos.view(b,2,-1) #  b x 2 x n
+        pos[:,:,:,0]=xs
+        pos[:,:,:,1]=ys
+        pos = pos.view(b,-1,2) #  b x n x 2
 
         return pos, x, None
 
@@ -658,7 +620,7 @@ class ClusterTransformer(nn.Module):
         '''
         x - b x c x h x w
         '''
-        pos, x, mask = self.patch_embed(x) # b x c x n, b x d x n
+        pos, x, mask = self.patch_embed(x) # b x n x c, b x n x d
         x = self.pos_drop(x)
         gsms = list()
 
@@ -673,7 +635,7 @@ class ClusterTransformer(nn.Module):
 
         assert torch.isnan(x).any()==False, "feat after layers nan"
         assert torch.isinf(x).any()==False, "feat after layers inf"
-        x = self.norm(x.permute(0,2,1)) # b x n x c
+        x = self.norm(x) # b x n x c
         x = self.avgpool(x.transpose(1, 2))  # b x c x 1
         assert torch.isnan(x).any()==False, "feat after pool nan"
         assert torch.isinf(x).any()==False, "feat after pool inf"
