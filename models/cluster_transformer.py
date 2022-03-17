@@ -277,9 +277,11 @@ class ClusterMerging(nn.Module):
         super().__init__()
         self.dim = dim 
         self.norm = norm_layer(dim)
-        self.linear1 = nn.Linear(pos_dim, 2*pos_dim, bias=True)
+        self.linear = nn.Linear(dim+pos_dim, 2*dim, bias=False)
+        '''
         self.act = nn.GELU()
         self.linear2 = nn.Linear(2*pos_dim, dim*2*dim, bias=True)
+        '''
 
     def forward(self, pos, feat, mask=None):
         """ 
@@ -301,8 +303,9 @@ class ClusterMerging(nn.Module):
         k = int(math.ceil(n / 4.0)) # avg cluster size is 4
         pos_lambda = 100.0
         with torch.no_grad():
-            _, _, member_idx, cluster_mask = kmeans_keops(feat, k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=pos_lambda, valid_mask=mask, init='random') # b x k x m, b x k x m
+            _, _, member_idx, cluster_mask = kmeans_keops(feat, k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=pos_lambda, valid_mask=mask, init='random', max_cluster_size=5) # b x k x m, b x k x m
         m = member_idx.shape[2]
+        #print("largest cluster size m",m)
         cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(pos, feat, member_idx, cluster_mask) # k' x m x d/c
         count = cluster_mask.sum(1) # k' x 1
 
@@ -314,16 +317,19 @@ class ClusterMerging(nn.Module):
         assert torch.isinf(mean_pos).any() == False, 'inf in mean_pos'
         rel_pos = cluster_pos - mean_pos.unsqueeze(1) # k' x m x d
 
+        '''
         # get trans matrix (b x n x c) @ (c x 2c)
         trans = self.linear2(self.act(self.linear1(rel_pos))) # k' x m x c2c
         trans = trans.reshape(-1,m,c,2*c) # k' x m x c x 2c
+        print("trans shape",trans.shape)
+        '''
 
         # norm the feat
         cluster_feat = self.norm(cluster_feat) # k' x m x c
-        cluster_feat = cluster_feat / count.unsqueeze(2)
-        # apply trans matrix and sum
-        merged_feat = cluster_feat.unsqueeze(2) @ trans # k' x m x 1 x 2c
-        merged_feat = merged_feat.squeeze(2).sum(1) # k' x 2c
+        merged_feat = self.linear(torch.cat([cluster_feat, rel_pos], dim=-1)) # k' x m x 2c
+        merged_feat = merged_feat * cluster_mask
+        merged_feat = merged_feat / count.unsqueeze(2)
+        merged_feat = merged_feat.sum(1) # k' x 2c
 
         # convert back to batch shape 
         if valid_row_idx is None:
