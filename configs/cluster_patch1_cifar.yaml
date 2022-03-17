@@ -9,7 +9,6 @@ MODEL:
     PATCH_SIZE: 1
   CLUSTER:
     POS_DIM: 2
-    K: [0,0,0]
     CLUSTER_SIZE: 16
     MAX_CLUSTER_SIZE: 0
     POS_LAMBDA: [100.0,30.0,10.0]

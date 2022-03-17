@@ -83,7 +83,6 @@ _C.MODEL.SWIN_MLP.PATCH_NORM = True
 # cluster parameters
 _C.MODEL.CLUSTER = CN()
 _C.MODEL.CLUSTER.POS_DIM = 2
-_C.MODEL.CLUSTER.K = [0,0,0]
 # priority of cluster size is large than k
 _C.MODEL.CLUSTER.CLUSTER_SIZE = 16
 _C.MODEL.CLUSTER.MAX_CLUSTER_SIZE = 0

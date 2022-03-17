@@ -336,8 +336,7 @@ class BasicLayer(nn.Module):
 
     Args:
         dim (int): Number of input channels.
-        k: number of clusters in k-means
-        cluster_size: the avg cluster size (priority above k)
+        cluster_size: the avg cluster size
         max_cluster_size: maximum cluster size
         depth (int): Number of blocks.
         num_heads (int): Number of attention heads.
@@ -355,14 +354,13 @@ class BasicLayer(nn.Module):
         use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
     """
 
-    def __init__(self, dim, k, cluster_size, max_cluster_size, depth, num_heads, pos_lambda=0.0003, pos_dim=2, 
+    def __init__(self, dim, cluster_size, max_cluster_size, depth, num_heads, pos_lambda=0.0003, pos_dim=2, 
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, adads=None, use_checkpoint=False):
 
         super().__init__()
         self.dim = dim
         self.pos_lambda = pos_lambda
-        self.k=k
         self.cluster_size=cluster_size
         self.max_cluster_size = None if max_cluster_size==0 else max_cluster_size
         self.pos_dim = pos_dim
@@ -412,10 +410,7 @@ class BasicLayer(nn.Module):
         else:
             cluster_pos = pos
             cluster_feat = feat
-            if mask is None:
-                cluster_mask = None 
-            else:
-                cluster_mask = mask
+            cluster_mask = mask
             valid_row_idx = None
 
         assert torch.isnan(feat).any()==False, "feat 2 nan"
@@ -523,7 +518,6 @@ class ClusterTransformer(nn.Module):
     Args:
         patch_size (int | tuple(int)): Patch size. Default: 4
         in_chans (int): Number of input image channels. Default: 3
-        k (tuple(int)): Number of kmeans clusters
         pos_lambda (tuple(float)): lambda for pos in kmeans
         num_classes (int): Number of classes for classification head. Default: 1000
         embed_dim (int): Patch embedding dimension. Default: 96
@@ -544,7 +538,7 @@ class ClusterTransformer(nn.Module):
     """
 
     def __init__(self, patch_size=4, in_chans=3, num_classes=1000,
-                 embed_dim=96, pos_dim=2, k=[64, 16, 4, 1], cluster_size=49, max_cluster_size=0, pos_lambda=[0.0003, 0.0001, 0.00003], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
+                 embed_dim=96, pos_dim=2, cluster_size=49, max_cluster_size=0, pos_lambda=[100.0,30.0,10.0,3.0], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, 
@@ -576,7 +570,6 @@ class ClusterTransformer(nn.Module):
         for i_layer in range(self.num_layers):
             layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
                                pos_dim=pos_dim,
-                               k=k[i_layer],
                                cluster_size=cluster_size,
                                max_cluster_size=max_cluster_size,
                                pos_lambda=pos_lambda[i_layer],
