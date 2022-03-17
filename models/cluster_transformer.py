@@ -302,6 +302,7 @@ class ClusterMerging(nn.Module):
         pos_lambda = 100.0
         with torch.no_grad():
             _, _, member_idx, cluster_mask = kmeans_keops(feat, k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=pos_lambda, valid_mask=mask, init='random') # b x k x m, b x k x m
+        m = member_idx.shape[2]
         cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(pos, feat, member_idx, cluster_mask) # k' x m x d/c
         count = cluster_mask.sum(1) # k' x 1
 
@@ -466,7 +467,10 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
-            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+            if downsample == PatchMerging:
+                self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+            else:
+                self.downsample = downsample(dim=dim, pos_dim=pos_dim, norm_layer=norm_layer)
         else:
             self.downsample = None
 
@@ -628,7 +632,8 @@ class ClusterTransformer(nn.Module):
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, 
-                 downsample=PatchMerging,
+                 #downsample=PatchMerging,
+                 downsample=ClusterMerging,
                  adads = AdaptiveDownsample,
                  use_checkpoint=False, **kwargs):
         super().__init__()
