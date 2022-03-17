@@ -112,13 +112,15 @@ def points2cluster(pos, feat, member_idx, cluster_mask, mask=None):
     valid_row_idx - list of int
     '''
     b,k,m = member_idx.shape
-    _,n,c = feat.shape
-    d = pos.shape[2]
-    batch_tmp = torch.arange(b,device=feat.device).long().unsqueeze(1).expand(-1,k*m)
+    _,n,d = pos.shape
+    if feat is not None:
+        c = feat.shape[2]
+    batch_tmp = torch.arange(b,device=pos.device).long().unsqueeze(1).expand(-1,k*m)
     member_idx = member_idx.view(b,-1)
     member_idx = (batch_tmp*n+member_idx).view(-1)
     cluster_pos = pos.reshape(-1,d)[member_idx].reshape(b,k,m,d).reshape(-1,m,d)
-    cluster_feat = feat.reshape(-1,c)[member_idx].reshape(b,k,m,c).reshape(-1,m,c)
+    if feat is not None:
+        cluster_feat = feat.reshape(-1,c)[member_idx].reshape(b,k,m,c).reshape(-1,m,c)
     if mask is not None:
         mask = mask.reshape(-1,1)[member_idx].reshape(b,k,m,1).reshape(-1,m,1)
     # get valid cluster id
@@ -131,12 +133,14 @@ def points2cluster(pos, feat, member_idx, cluster_mask, mask=None):
             valid_row_idx = None
         else:
             cluster_pos = cluster_pos[valid_row_idx]
-            cluster_feat = cluster_feat[valid_row_idx]
+            if feat is not None:
+                cluster_feat = cluster_feat[valid_row_idx]
             cluster_mask = cluster_mask[valid_row_idx]
             if mask is not None:
                 mask = mask[valid_row_idx]
         cluster_pos *= cluster_mask
-        cluster_feat *= cluster_mask
+        if feat is not None:
+            cluster_feat *= cluster_mask
         if mask is not None:
             mask *= cluster_mask
         if cluster_mask.min() > 0:
@@ -144,10 +148,16 @@ def points2cluster(pos, feat, member_idx, cluster_mask, mask=None):
     else:
         cluster_mask = None
         valid_row_idx = None
-    if mask is not None:
-        return cluster_pos, cluster_feat, mask, valid_row_idx
+    if feat is not None:
+        if mask is not None:
+            return cluster_pos, cluster_feat, mask, valid_row_idx
+        else:
+            return cluster_pos, cluster_feat, cluster_mask, valid_row_idx
     else:
-        return cluster_pos, cluster_feat, cluster_mask, valid_row_idx
+        if mask is not None:
+            return cluster_pos, mask, valid_row_idx
+        else:
+            return cluster_pos, cluster_mask, valid_row_idx
 
 def knn_keops(query, database, k, return_dist = False, mask=None):
     '''
