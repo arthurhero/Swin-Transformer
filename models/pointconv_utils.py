@@ -349,6 +349,8 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     elif init=='kmeans++':
         means, means_pos = init_kmeanspp(points, k, pos, pos_lambda, valid_mask) # b x k x c, b x k x d
 
+    if valid_mask is not None:
+        valid_mask = valid_mask.squeeze(2) # b x n
     points_ = LazyTensor(points[:,:,None,:]) # b x n x 1 x c
     means_ = LazyTensor(means[:,None,:,:]) # b x 1 x k x c
     if pos is not None:
@@ -366,7 +368,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         # re-compute the means
         means.zero_() # content of lazytensor will change with the original tensor
         means.scatter_add_(dim=1, index=mean_assignment.expand(-1,-1,c), src=points) # invalid points will contribute 0
-        bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask.squeeze(2), k) # b x k
+        bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask, k) # b x k
         means /= bin_size.unsqueeze(2)
         if pos is not None:
             means_pos.zero_()
@@ -379,14 +381,13 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         dist = dist + (pos_lambda / d * c) * dist_pos
     mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
 
-    max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask.squeeze(2)).max().item()
+    max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
     #print("max bin size",max_bin_size, "avg size", n//k)
     if max_cluster_size is not None:
         max_bin_size = min(max_cluster_size, max_bin_size)
     # get reverse_assignment
     sorted_assignment, sorted_point_idx = mean_assignment.squeeze(2).sort(dim=-1, descending=False) # b x n, b x n
     if valid_mask is not None:
-        valid_mask = valid_mask.squeeze(2) # b x n
         num_valid = valid_mask.sum() # total number of valid points
         sorted_valid_mask = valid_mask.gather(index=sorted_point_idx,dim=-1) # b x n
         sorted_valid_mask = sorted_valid_mask.reshape(-1)

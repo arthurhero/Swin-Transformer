@@ -401,7 +401,7 @@ class BasicLayer(nn.Module):
         assert torch.isnan(feat).any()==False, "feat 1 nan "+str(n) 
         assert torch.isinf(feat).any()==False, "feat 1 inf "+str(n) 
         c = feat.shape[2]
-        assert = self.cluster_size > 0, 'self.cluster_size must be positive'
+        assert self.cluster_size > 0, 'self.cluster_size must be positive'
         self.k = int(math.ceil(n / float(self.cluster_size)))
         if self.k>1:
             # perform k-means
