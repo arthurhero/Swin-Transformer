@@ -87,8 +87,7 @@ class ClusterAttention(nn.Module):
 
         # calculate bias for pos
         pos = pos.clone().to(feat.dtype)
-        for i in range(d):
-            pos[:,:,i] = pos[:,:,i].clone() / pos[:,:,i].max() # normalize
+        pos = pos / pos.view(-1,d).max(0)[0] #  normalize
         rel_pos = pos.unsqueeze(1) - pos.unsqueeze(2) # k x m x m x 2
         pos_bias = self.pos_mlp(rel_pos) # k x m x m x h
         pos_bias = pos_bias.permute(0,3,1,2) # k x h x m x m
@@ -197,7 +196,6 @@ class PatchMerging(nn.Module):
 
     Args:
         dim (int): Number of input channels.
-        pos_dim: dimension of x,y coordinates
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
 
@@ -218,6 +216,7 @@ class PatchMerging(nn.Module):
         mask - b x n x 1
         """
         b,n,c = feat.shape
+        assert c == self.dim, "dim does not accord to input"
         max_x = pos[:,:,0].max()+1
         max_y = pos[:,:,1].max()+1
         h = (torch.ceil(max_y / 2.0)*2).long().item() # make sure the number is even
@@ -240,9 +239,9 @@ class PatchMerging(nn.Module):
         x = x.view(b,-1,c)
 
         # create new pos tensor
-        pos = feat.new(b,h,w,2).zero_().long()
-        hs = torch.arange(0,h).long()
-        ws = torch.arange(0,w).long()
+        pos = feat.new(b,h,w,2).zero_()
+        hs = torch.arange(0,h)
+        ws = torch.arange(0,w)
         ys,xs = torch.meshgrid(hs,ws)
         xs=xs.unsqueeze(0).expand(b,-1,-1)
         ys=ys.unsqueeze(0).expand(b,-1,-1)
@@ -252,11 +251,10 @@ class PatchMerging(nn.Module):
 
         # mask
         if mask is not None:
-            mask = nn.AdaptiveMaxPool2d((h,w))(mask.float()).long()
+            mask = nn.AdaptiveMaxPool2d((h,w))(mask.float())
             mask = mask.view(b,-1).unsqueeze(2) # b x n x 1
 
         return pos, x, mask
-
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}"
@@ -264,6 +262,94 @@ class PatchMerging(nn.Module):
     def flops(self):
         flops = 0
         return flops
+
+
+class ClusterMerging(nn.Module):
+    r""" Cluster Merging Layer.
+
+    Args:
+        dim (int): Number of input channels.
+        pos_dim: dimension of x,y coordinates
+        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
+    """
+
+    def __init__(self, dim, pos_dim, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.dim = dim 
+        self.norm = norm_layer(dim)
+        self.linear1 = nn.Linear(pos_dim, 2*pos_dim, bias=True)
+        self.act = nn.GELU()
+        self.linear2 = nn.Linear(2*pos_dim, dim*2*dim, bias=True)
+
+    def forward(self, pos, feat, mask=None):
+        """ 
+        pos - b x n x d
+        feat - b x n x c
+        mask - b x n x 1
+        return
+        pos - b x n x d
+        feat - b x n x c
+        mask - b x n x 1
+        """
+        b,n,c = feat.shape
+        assert c == self.dim, "dim does not accord to input"
+        d = pos.shape[2]
+        if mask is not None:
+            pos = pos *  mask
+            feat = feat * mask
+        # kmeans on feat
+        k = int(math.ceil(n / 4.0)) # avg cluster size is 4
+        pos_lambda = 100.0
+        with torch.no_grad():
+            _, _, member_idx, cluster_mask = kmeans_keops(feat, k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=pos_lambda, valid_mask=mask, init='random') # b x k x m, b x k x m
+        cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(pos, feat, member_idx, cluster_mask) # k' x m x d/c
+        count = cluster_mask.sum(1) # k' x 1
+
+        # get relative and mean pos
+        cluster_pos = cluster_pos.to(feat.dtype)
+        cluster_pos = cluster_pos / cluster_pos.view(-1,d).max(0)[0] #  normalize
+        mean_pos = cluster_pos.sum(1) / count # k' x d
+        assert torch.isnan(mean_pos).any() == False, 'nan in mean_pos'
+        assert torch.isinf(mean_pos).any() == False, 'inf in mean_pos'
+        rel_pos = cluster_pos - mean_pos.unsqueeze(1) # k' x m x d
+
+        # get trans matrix (b x n x c) @ (c x 2c)
+        trans = self.linear2(self.act(self.linear1(rel_pos))) # k' x m x c2c
+        trans = trans.reshape(-1,m,c,2*c) # k' x m x c x 2c
+
+        # norm the feat
+        cluster_feat = self.norm(cluster_feat) # k' x m x c
+        cluster_feat = cluster_feat / count.unsqueeze(2)
+        # apply trans matrix and sum
+        merged_feat = cluster_feat.unsqueeze(2) @ trans # k' x m x 1 x 2c
+        merged_feat = merged_feat.squeeze(2).sum(1) # k' x 2c
+
+        # convert back to batch shape 
+        if valid_row_idx is None:
+            new_mask = None
+            new_feat = merged_feat.reshape(b,k,2*c)
+            new_pos = mean_pos.reshape(b,k,d)
+        else:
+            new_mask = torch.zeros(b*k,1,device = feat.device, dtype=feat.dtype)
+            new_mask[valid_row_idx] = 1 
+            new_feat = torch.zeros(b*k,2*c,device = feat.device, dtype=feat.dtype)
+            new_feat[valid_row_idx] = merged_feat
+            new_pos = torch.zeros(b*k,d,device = feat.device, dtype=feat.dtype)
+            new_pos[valid_row_idx] = mean_pos
+
+            new_mask = new_mask.reshape(b,k,1)
+            new_feat = new_feat.reshape(b,k,2*c)
+            new_pos = new_pos.reshape(b,k,d)
+
+        return new_pos, new_feat, new_mask
+
+    def extra_repr(self) -> str:
+        return f"dim={self.dim}"
+
+    def flops(self):
+        flops = 0
+        return flops
+
 
 class AdaptiveDownsample(nn.Module):
     r""" Adaptive Doownsampling Layer.
@@ -495,9 +581,9 @@ class PatchEmbed(nn.Module):
         assert torch.isnan(x).any()==False, "feat 000 nan"
         assert torch.isinf(x).any()==False, "feat 000 inf"
 
-        pos = x.new(b,h,w,2).zero_().long()
-        hs = torch.arange(0,h).long()
-        ws = torch.arange(0,w).long()
+        pos = x.new(b,h,w,2).zero_()
+        hs = torch.arange(0,h)
+        ws = torch.arange(0,w)
         ys,xs = torch.meshgrid(hs,ws)
         xs=xs.unsqueeze(0).expand(b,-1,-1)
         ys=ys.unsqueeze(0).expand(b,-1,-1)

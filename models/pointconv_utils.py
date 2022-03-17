@@ -15,9 +15,9 @@ def img2points(img):
     return point position and color - b x n x 2, b x n x c
     '''
     b,c,h,w = img.shape
-    pos = img.new(b,2,h,w).zero_().long()
-    hs = torch.arange(0,h, device=img.device).long()
-    ws = torch.arange(0,w, device=img.device).long()
+    pos = img.new(b,2,h,w).zero_()
+    hs = torch.arange(0,h, device=img.device)
+    ws = torch.arange(0,w, device=img.device)
     ys,xs = torch.meshgrid(hs,ws)
     xs=xs.unsqueeze(0).expand(b,-1,-1)
     ys=ys.unsqueeze(0).expand(b,-1,-1)
@@ -56,9 +56,9 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
     _, m, c = cluster_feat.shape
     d = cluster_pos.shape[2]
     if valid_row_idx is not None:
-        new_pos = cluster_pos.new(b*k,m,d).zero_().long()
+        new_pos = cluster_pos.new(b*k,m,d).zero_()
         new_feat = cluster_feat.new(b*k,m,c).zero_()
-        new_mask = cluster_feat.new(b*k,m,1).zero_().long()
+        new_mask = cluster_feat.new(b*k,m,1).zero_()
         new_feat[valid_row_idx] = cluster_feat
         new_pos[valid_row_idx] = cluster_pos
         if cluster_mask is None:
@@ -91,7 +91,7 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
         valid_mask = new_mask.view(-1,1)[valid_idx] # z x 1
         z = len(valid_idx)
         rotate_idx = torch.arange(largest_n,device=valid_mask.device).long().repeat(int(math.ceil(z/largest_n)))[:z]
-        new_pos = cluster_pos.new(b,largest_n,d).zero_().long()
+        new_pos = cluster_pos.new(b,largest_n,d).zero_()
         new_feat = cluster_feat.new(b,largest_n,c).zero_()
         new_mask = cluster_feat.new(b,largest_n,1).zero_().to(valid_mask.dtype)
         new_pos[batch_idx,rotate_idx] = valid_pos
@@ -206,8 +206,8 @@ def batched_bincount(mat, valid_mask=None, k=None):
     b,n = mat.shape
     if k is None:
         k = mat.max().item() + 1
-    result = torch.zeros(b,k,device = mat.device).long()
-    ones = torch.ones(mat.shape,device = mat.device).long()
+    result = torch.zeros(b,k,device = mat.device)
+    ones = torch.ones(mat.shape,device = mat.device)
     if valid_mask is not None:
         ones *= valid_mask
     result.scatter_add_(dim=1, index=mat, src=ones) # b x k
@@ -340,7 +340,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
             # turn excessive invalid means to nan
             means_valid_mask = valid_mask[:,rand_idx] # b x k x 1
             row_sum = means_valid_mask.sum(1)[:,0] # b, check if all are invalid
-            all_zero_index = (row_sum==0).long().nonzero().squeeze()
+            all_zero_index = (row_sum==0).nonzero().squeeze()
             means_valid_mask[all_zero_index, 0] = 1
             nan_mask = means_valid_mask / means_valid_mask # 1 is 1, 0 becomes nan
             means *= nan_mask
@@ -381,7 +381,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
         dist = dist + (pos_lambda / d * c) * dist_pos
     mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
 
-    max_bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item()
+    max_bin_size = int(batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item())
     #print("max bin size",max_bin_size, "avg size", n//k)
     if max_cluster_size is not None:
         max_bin_size = min(max_cluster_size, max_bin_size)
