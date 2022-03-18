@@ -303,21 +303,29 @@ class ClusterMerging(nn.Module):
         k = int(math.ceil(n / 4.0)) # avg cluster size is 4
         pos_lambda = 100.0
         with torch.no_grad():
-            _, mean_assignment, member_idx, cluster_mask_orig = kmeans_keops(feat, k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=pos_lambda, valid_mask=mask, init='random', max_cluster_size=5) # b x n x 1, b x k x m, b x k x m
+            _, mean_assignment, member_idx, cluster_mask = kmeans_keops(feat, k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=pos_lambda, valid_mask=mask, init='random') # b x n x 1, b x k x m, b x k x m
         m = member_idx.shape[2]
         pos = pos.to(feat.dtype)
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
         mean_pos = torch.zeros(b,k,d,device = pos.device,dtype=pos.dtype)
         mean_pos.scatter_add_(dim=1, index=mean_assignment.expand(-1,-1,d), src=pos)
-        count = batched_bincount(mean_assignment.squeeze(2), mask, k) # b x k
+        if mask is not None:
+            count = batched_bincount(mean_assignment.squeeze(2), mask.squeeze(2), k) # b x k
+        else:
+            count = batched_bincount(mean_assignment.squeeze(2), None, k) # b x k
         mean_pos = mean_pos / count.unsqueeze(2) # b x k x d
-        rel_pos = pos - means_pos.gather(index=mean_assignment.expand(-1,-1,d), dim=1) # b x n x d
+        rel_pos = pos - mean_pos.gather(index=mean_assignment.expand(-1,-1,d), dim=1) # b x n x d
 
-        feat = self.norm(torch.cat([feat, rel_pos], dim=-1)) # b x k x (2+c)
-        feat = self.linear(feat) # b x k x 2c
+        feat = self.norm(torch.cat([feat, rel_pos], dim=-1)) # b x n x (2+c)
+
+        feat = self.linear(feat) # b x n x 2c
         
-        cluster_feat, cluster_mask, valid_row_idx = points2cluster(feat, None, member_idx, cluster_mask) # k' x m x d/c
-        count = cluster_mask.sum(1) # k' x 1
+        cluster_feat, cluster_mask, valid_row_idx = points2cluster(feat, None, member_idx, cluster_mask) # k' x m x c
+        count2 = cluster_mask.sum(1) # k' x 1
+        if valid_row_idx is not None:
+            count = count.view(-1)[valid_row_idx]
+        assert (count2.view(-1) == count.view(-1)).all(), 'counts does not fit'
+        count = count2
 
         merged_feat = cluster_feat / count.unsqueeze(2)
         merged_feat = merged_feat.sum(1) # k' x 2c
@@ -328,11 +336,11 @@ class ClusterMerging(nn.Module):
             new_feat = merged_feat.reshape(b,k,2*c)
             new_pos = mean_pos
         else:
-            new_mask = torch.zeros(b*k,1,device = feat.device, dtype=feat.dtype)
+            new_mask = torch.zeros(b*k,1,device = feat.device, dtype=merged_feat.dtype)
             new_mask[valid_row_idx] = 1 
-            new_feat = torch.zeros(b*k,2*c,device = feat.device, dtype=feat.dtype)
+            new_feat = torch.zeros(b*k,2*c,device = feat.device, dtype=merged_feat.dtype)
             new_feat[valid_row_idx] = merged_feat
-            new_pos = torch.zeros(b*k,d,device = feat.device, dtype=feat.dtype)
+            new_pos = torch.zeros(b*k,d,device = feat.device, dtype=mean_pos.dtype)
             new_pos[valid_row_idx] = mean_pos.reshape(-1,d)[valid_row_idx]
 
             new_mask = new_mask.reshape(b,k,1)

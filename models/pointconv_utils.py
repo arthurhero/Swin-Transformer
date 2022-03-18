@@ -369,6 +369,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
 
     for i in range(num_iter):
         # find nearest mean
+        means_orig = means.clone()
         dist = ((points_ - means_) ** 2).sum(-1) # b x n x k
         if pos is not None:
             dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
@@ -392,7 +393,6 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
 
     max_bin_size = int(batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item())
-    #print("max bin size",max_bin_size, "avg size", n//k)
     if max_cluster_size is not None:
         max_bin_size = min(max_cluster_size, max_bin_size)
     # get reverse_assignment
@@ -432,7 +432,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     del points
     if pos is not None:
         del pos
-
+    
     return means, mean_assignment, reverse_assignment, valid_assignment_mask 
 
 
