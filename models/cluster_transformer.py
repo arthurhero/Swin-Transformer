@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from .pointconv_utils import points2img, kmeans_keops, cluster2points, points2cluster, batched_bincount
+from .point_utils import points2img, kmeans_keops, cluster2points, points2cluster, batched_bincount
 import torch_scatter
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
