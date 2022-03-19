@@ -60,41 +60,65 @@ class ClusterAttention(nn.Module):
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=pos_mlp_bias)
+        #self.qkv = nn.Linear(head_dim, head_dim * 3, bias=qkv_bias)
+        self.qkv = torch.nn.Conv1d(dim, dim * 3, 1, stride=1, groups=num_heads, bias=qkv_bias)
+        #self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=pos_mlp_bias)
+        self.pos_mlp = torch.nn.Conv1d(num_heads*pos_dim, num_heads, 1, stride=1, groups=num_heads, bias=pos_mlp_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, pos, feat, mask):
+    def forward(self, pos, feat, member_idx, cluster_mask):
         """
         Args:
-            pos - k x m x d, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
-            feat - k x m x c, the features of points
-            mask - k x m x 1, the binary mask indicating valid points
+            pos - b x n x d, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
+            feat - b x n x c, the features of points
+            member_idx - b x h x k x m
+            cluster_mask - b*h x k x m
         """
-        k_,m,c = feat.shape
+        b,n,c = feat.shape
+        if member_idx is not None:
+            _,h,k,m = member_idx.shape
+        else:
+            h = self.num_heads
+            k = 1
+            m = n
         d = pos.shape[2]
         assert c == self.dim, "dim does not accord to input"
         assert d == self.pos_dim, "pos dim does not accord to input"
-        qkv = self.qkv(feat).reshape(k_ ,m, 3, self.num_heads, c//self.num_heads).permute(2, 0, 3, 1, 4) # 3 x k x h x m x c'
-        q, k, v = qkv[0], qkv[1], qkv[2]  # k x h x m x c'
+        c_ = c // h
+        feat = feat.reshape(b,n,h,c_)
+        qkv = self.qkv(feat.reshape(b*n,1,c)).reshape(b,n,h,3,c_) # b x n x h x x 3 x c_
+        if member_idx is not None:
+            qkv = qkv.permute(3,0,2,1,4).reshape(3,b*h,n,c_) # 3 x b*h x n x c_
+            member_idx = member_idx.rehspae(-1) # b*h*k*m
+            batch_idx = torch.arange(b*h,device=feat.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1) # b*h*k*m
+            qkv = qkv[:,batch_idx,member_idx].clone() # 3 x b*h*k*m x c_
+            qkv = qkv.reshape(3,b,h,k,m,c_).permute(0,1,3,2,4,5).reshape(3,b*k,h,m,c_)
+        else:
+            qkv = qkv.permute(3,0,2,1,4) # 3 x b x h x n x c_
+
+        q, k, v = qkv[0], qkv[1], qkv[2]  # b*k x h x m x c_
 
         q = q * self.scale
-        attn = (q @ k.transpose(-2, -1)) # k x h x m x m
+        attn = (q @ k.transpose(-2, -1)) # b*k x h x m x m
 
         # calculate bias for pos
-        pos = pos.clone().to(feat.dtype)
-        pos = pos / pos.view(-1,d).max(0)[0] #  normalize
-        rel_pos = pos.unsqueeze(1) - pos.unsqueeze(2) # k x m x m x 2
-        pos_bias = self.pos_mlp(rel_pos) # k x m x m x h
-        pos_bias = pos_bias.permute(0,3,1,2) # k x h x m x m
+        pos = pos.to(feat.dtype)
+        pos = pos / pos.view(-1,d).max(0)[0] # normalize
+        pos = pos.unsqueeze(1).expand(-1,h,-1,-1)
+        if member_idx is not None:
+            pos = pos.reshape(b*h,n,d)[batch_idx,member_idx].clone() # b*h*k*m x d
+            pos = pos.reshape(b,h,k,m,d).permute(0,2,1,3,4).reshape(b*k,h,m,d)
+        rel_pos = pos.unsqueeze(2) - pos.unsqueeze(3) # b*k x h x m x m x d
+        rel_pos = rel_pos.permute(0,2,3,1,4).reshape(b*k*m*m,1,h*d)
+        pos_bias = self.pos_mlp(rel_pos).reshape(b*k,m,m,h).permute(0,3,1,2) # b*k x h x m x m
 
         attn = attn + pos_bias 
-        if mask is not None:
-            mask = mask.permute(0,2,1).unsqueeze(2) # k x 1 x 1 x m
+        if cluster_mask is not None:
+            mask = cluster_mask.reshape(b,h,k,m).permute(0,2,1,3).reshape(b*k,h,1,m)
             '''
             '''
             mask = (mask.expand(-1,-1,m,-1) + torch.eye(m,device=mask.device,dtype=mask.dtype))
@@ -107,10 +131,16 @@ class ClusterAttention(nn.Module):
 
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(k_, m, c)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
+        feat = (attn @ v).reshape(b,k,h,m,c_).permute(0,2,1,3,4).reshape(b*h*k*m,c_) # b*h*k*m x c_
+        if member_idx is not None:
+            new_feat = torch.zeros(b*h,n,c_, device=feat.device, dtype=feat.dtype)
+            new_feat[batch_idx, member_idx] = feat
+            feat = new_feat.reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c) # b x n x c
+        else:
+            feat = feat.reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c)
+        feat = self.proj(feat)
+        feat = self.proj_drop(feat)
+        return feat
 
     def extra_repr(self) -> str:
         return f'dim={self.dim}, num_heads={self.num_heads}'
@@ -157,15 +187,16 @@ class ClusterTransformerBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, pos, feat, mask):
+    def forward(self, pos, feat, member_idx, cluster_mask):
         """
         Args:
-            pos - k x m x 2, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
-            feat - k x m x c, the features of points
-            mask - k x m x 1, the binary mask indicating valid points
+            pos - b x n x d, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
+            feat - b x n x c, the features of points
+            member_idx - b x h x k x m
+            cluster_mask - b*h x k x m
         """
 
-        k,m,c = feat.shape
+        b,n,c = feat.shape
         d = pos.shape[2]
         assert c == self.dim, "dim does not accord to input"
         assert d == self.pos_dim, "pos dim does not accord to input"
@@ -174,7 +205,7 @@ class ClusterTransformerBlock(nn.Module):
         x = self.norm1(feat)
 
         # cluster attention 
-        x = self.attn(pos, x, mask)  # k x m x c
+        x = self.attn(pos, x, member_idx, cluster_mask)
 
         # FFN
         x = shortcut + self.drop_path(x)
@@ -399,6 +430,7 @@ class BasicLayer(nn.Module):
         self.pos_dim = pos_dim
         self.depth = depth
         self.use_checkpoint = use_checkpoint
+        self.num_heads = num_heads
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -428,53 +460,43 @@ class BasicLayer(nn.Module):
         mask - b x n x 1
         '''
         b,n,d = pos.shape
+        h = self.num_heads
         assert torch.isnan(feat).any()==False, "feat 1 nan "+str(n) 
         assert torch.isinf(feat).any()==False, "feat 1 inf "+str(n) 
         c = feat.shape[2]
+        c_ = c // h
         assert self.cluster_size > 0, 'self.cluster_size must be positive'
         self.k = int(math.ceil(n / float(self.cluster_size)))
+        k = self.k
+        feat_h = feat.reshape(b,n,h,c_head).permute(0,2,1,3).reshape(-1,n,c_) # (b*h) x n x c_
+        pos_h = pos.unsqueeze(1).expand(-1,h,-1,-1).reshape(-1,n,d) # (b*h) x n x d
+        if mask is not None:
+            mask_h = mask.unsqueeze(1).expand(-1,h,-1,-1).reshape(-1,n,1) # (b*h) x n x 1
+        else:
+            mask_h = None
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                _, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random') # b x k x m, b x k x m
-                #print("keep ratio", cluster_mask.sum() / (b*n))
-            cluster_pos, cluster_feat, cluster_mask, valid_row_idx = points2cluster(pos, feat, member_idx, cluster_mask, mask=mask)
+                _, _, member_idx, cluster_mask = kmeans_keops(feat_h, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos_h, pos_lambda=self.pos_lambda, valid_mask=mask_h, init='random') # (b*h) x k x m, (b*h) x k x m
+            member_idx = member_idx.reshape(b,h,k,m)
         else:
-            cluster_pos = pos
-            cluster_feat = feat
-            cluster_mask = mask
-            valid_row_idx = None
+            member_idx = None
+            cluster_mask = mask_h
+            if mask_h is not None:
+                cluster_mask = mask_h.transpose(1,2) # (b*h) x 1 x n
 
-        assert torch.isnan(feat).any()==False, "feat 2 nan"
-        assert torch.isinf(feat).any()==False, "feat 2 inf"
-
-
-        k = self.k
         for i_blk in range(len(self.blocks)):
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
-                cluster_feat = checkpoint.checkpoint(cluster_pos, cluster_feat, cluster_mask)
+                feat = checkpoint.checkpoint(pos, feat, member_idx, cluster_mask)
             else:
-                cluster_feat = blk(cluster_pos, cluster_feat, cluster_mask)
-        assert torch.isnan(feat).any()==False, "feat 3 nan"
-        assert torch.isinf(feat).any()==False, "feat 3 inf"
+                feat = blk(pos, feat, member_idx, cluster_mask)
 
-        if self.k==1:
-            new_pos = cluster_pos
-            new_feat = cluster_feat
-            new_mask = mask
-        else:
-            # convert back to batches
-            '''
-            '''
-            if cluster_mask is not None:
-                cluster_mask = cluster_mask.detach()
-            new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k, filter_invalid=True)
         if self.downsample is not None:
-            new_pos, new_feat, new_mask = self.downsample(new_pos, new_feat, new_mask)
+            pos, feat, mask = self.downsample(pos, feat, mask)
         assert torch.isnan(feat).any()==False, "feat 4 nan"
         assert torch.isinf(feat).any()==False, "feat 4 inf"
-        return new_pos, new_feat, new_mask
+        return pos, feat, mask
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, depth={self.depth}"
@@ -569,8 +591,8 @@ class ClusterTransformer(nn.Module):
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, 
-                 #downsample=PatchMerging,
-                 downsample=ClusterMerging,
+                 downsample=PatchMerging,
+                 #downsample=ClusterMerging,
                  use_checkpoint=False, **kwargs):
         super().__init__()
 

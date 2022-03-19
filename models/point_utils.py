@@ -55,6 +55,7 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
     '''
     _, m, c = cluster_feat.shape
     d = cluster_pos.shape[2]
+    '''
     if valid_row_idx is not None:
         new_pos = cluster_pos.new(b*k,m,d).zero_()
         new_feat = cluster_feat.new(b*k,m,c).zero_()
@@ -75,6 +76,10 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
     new_pos = new_pos.reshape(b,k,m,d).reshape(b,-1,d) # b x n x d
     if new_mask is not None:
         new_mask = new_mask.reshape(b,k,m,1).reshape(b,-1,1) # b x n x 1
+    '''
+    new_feat = cluster_feat
+    new_pos = cluster_pos
+    new_mask = cluster_mask 
 
     if new_mask is not None and filter_invalid:
         new_mask_sum = new_mask.sum(1)
@@ -131,6 +136,7 @@ def points2cluster(pos, feat, member_idx, cluster_mask, mask=None):
         cluster_mask = cluster_mask.reshape(-1,m).unsqueeze(2) # k' x m x 1
         if len(valid_row_idx) == b*k:
             valid_row_idx = None
+        '''
         else:
             cluster_pos = cluster_pos[valid_row_idx]
             if feat is not None:
@@ -138,6 +144,7 @@ def points2cluster(pos, feat, member_idx, cluster_mask, mask=None):
             cluster_mask = cluster_mask[valid_row_idx]
             if mask is not None:
                 mask = mask[valid_row_idx]
+        '''
         cluster_pos *= cluster_mask
         if feat is not None:
             cluster_feat *= cluster_mask
