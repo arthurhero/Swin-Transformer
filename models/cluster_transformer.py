@@ -89,21 +89,20 @@ class ClusterAttention(nn.Module):
         assert c == self.dim, "dim does not accord to input"
         assert d == self.pos_dim, "pos dim does not accord to input"
         c_ = c // h
-        feat = feat.reshape(b,n,h,c_)
-        qkv = self.qkv(feat.reshape(b*n,1,c)).reshape(b,n,h,3,c_) # b x n x h x x 3 x c_
+        qkv = self.qkv(feat.reshape(b*n,c,1)).reshape(b,n,h,3,c_) # b x n x h x x 3 x c_
         if member_idx is not None:
             qkv = qkv.permute(3,0,2,1,4).reshape(3,b*h,n,c_) # 3 x b*h x n x c_
-            member_idx = member_idx.rehspae(-1) # b*h*k*m
+            member_idx = member_idx.reshape(-1) # b*h*k*m
             batch_idx = torch.arange(b*h,device=feat.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1) # b*h*k*m
             qkv = qkv[:,batch_idx,member_idx].clone() # 3 x b*h*k*m x c_
             qkv = qkv.reshape(3,b,h,k,m,c_).permute(0,1,3,2,4,5).reshape(3,b*k,h,m,c_)
         else:
             qkv = qkv.permute(3,0,2,1,4) # 3 x b x h x n x c_
 
-        q, k, v = qkv[0], qkv[1], qkv[2]  # b*k x h x m x c_
+        q, key, v = qkv[0], qkv[1], qkv[2]  # b*k x h x m x c_
 
         q = q * self.scale
-        attn = (q @ k.transpose(-2, -1)) # b*k x h x m x m
+        attn = (q @ key.transpose(-2, -1)) # b*k x h x m x m
 
         # calculate bias for pos
         pos = pos.to(feat.dtype)
@@ -113,7 +112,7 @@ class ClusterAttention(nn.Module):
             pos = pos.reshape(b*h,n,d)[batch_idx,member_idx].clone() # b*h*k*m x d
             pos = pos.reshape(b,h,k,m,d).permute(0,2,1,3,4).reshape(b*k,h,m,d)
         rel_pos = pos.unsqueeze(2) - pos.unsqueeze(3) # b*k x h x m x m x d
-        rel_pos = rel_pos.permute(0,2,3,1,4).reshape(b*k*m*m,1,h*d)
+        rel_pos = rel_pos.permute(0,2,3,1,4).reshape(b*k*m*m,h*d,1)
         pos_bias = self.pos_mlp(rel_pos).reshape(b*k,m,m,h).permute(0,3,1,2) # b*k x h x m x m
 
         attn = attn + pos_bias 
@@ -468,7 +467,7 @@ class BasicLayer(nn.Module):
         assert self.cluster_size > 0, 'self.cluster_size must be positive'
         self.k = int(math.ceil(n / float(self.cluster_size)))
         k = self.k
-        feat_h = feat.reshape(b,n,h,c_head).permute(0,2,1,3).reshape(-1,n,c_) # (b*h) x n x c_
+        feat_h = feat.reshape(b,n,h,c_).permute(0,2,1,3).reshape(-1,n,c_) # (b*h) x n x c_
         pos_h = pos.unsqueeze(1).expand(-1,h,-1,-1).reshape(-1,n,d) # (b*h) x n x d
         if mask is not None:
             mask_h = mask.unsqueeze(1).expand(-1,h,-1,-1).reshape(-1,n,1) # (b*h) x n x 1
@@ -478,7 +477,7 @@ class BasicLayer(nn.Module):
             # perform k-means
             with torch.no_grad():
                 _, _, member_idx, cluster_mask = kmeans_keops(feat_h, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos_h, pos_lambda=self.pos_lambda, valid_mask=mask_h, init='random') # (b*h) x k x m, (b*h) x k x m
-            member_idx = member_idx.reshape(b,h,k,m)
+            member_idx = member_idx.reshape(b,h,k,member_idx.shape[-1])
         else:
             member_idx = None
             cluster_mask = mask_h
