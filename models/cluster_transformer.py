@@ -161,8 +161,12 @@ class ClusterAttention(nn.Module):
             new_feat[batch_idx, member_idx] = feat
             feat = new_feat.reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c) # b x n x c
             '''
+            if cluster_mask is not None:
+                valid_idx = cluster_mask.reshape(-1).nonzero().reshape(-1)
+                batch_idx = batch_idx[valid_idx]
+                member_idx = member_idx[valid_idx]
             new_feat = torch.zeros(b,n,c, device=feat.device, dtype=feat.dtype)
-            new_feat[batch_idx, member_idx] = feat
+            new_feat[batch_idx, member_idx] = feat[valid_idx]
             feat = new_feat
         else:
             #feat = feat.reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c)
