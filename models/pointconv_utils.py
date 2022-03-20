@@ -40,7 +40,7 @@ def points2img(pos,pixel,h,w):
     img.scatter_(src=pixel, index=idx, dim=2)
     return img.view(b,c,h,w)
 
-def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k, filter_invalid=False):
+def cluster2points(cluster_pos, cluster_feat, member_idx, cluster_mask, valid_row_idx, b, k, filter_invalid=False):
     '''
     cluster_pos - k' x m x d
     cluster_feat - k' x m x c
@@ -51,6 +51,7 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
     '''
     _, m, c = cluster_feat.shape
     d = cluster_pos.shape[2]
+    n = member_idx.max()+1
     if valid_row_idx is not None:
         new_pos = cluster_pos.new(b*k,m,d).zero_().long()
         new_feat = cluster_feat.new(b*k,m,c).zero_()
@@ -66,30 +67,18 @@ def cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, k,
         new_pos = cluster_pos
         new_mask = cluster_mask 
 
-    new_feat = new_feat.reshape(b,k,m,c).permute(0,3,1,2).reshape(b,c,-1) # b x c x n
-    new_pos = new_pos.reshape(b,k,m,d).permute(0,3,1,2).reshape(b,d,-1) # b x d x n
+    member_idx = member_idx.permute(0,2,1).reshape(-1)
+    batch_idx = torch.arange(b,device=cluster_feat.device).long.unsqueeze(1).expand(-1,k*m).reshape(-1)
+    feat = cluster_feat.new(b,n,c).zero_()
+    feat[batch_idx,member_idx] = new_feat.reshape(-1,c)
+    pos = cluster_pos.new(b,n,d).zero_()
+    pos[batch_idx,member_idx] = new_pos.reshape(-1,d)
     if new_mask is not None:
-        new_mask = new_mask.reshape(b,k,m,1).permute(0,3,1,2).reshape(b,1,-1) # b x 1 x n
-
-    if new_mask is not None and filter_invalid:
-        largest_n = new_mask.sum(2).max() # largest sample size
-        valid_idx = new_mask.view(-1).nonzero().squeeze() # z
-        batch_idx = torch.arange(b,device=valid_idx.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1)[valid_idx] # z
-
-        valid_feat = new_feat.permute(0,2,1).view(-1,c)[valid_idx] # z x c
-        valid_pos = new_pos.permute(0,2,1).view(-1,d)[valid_idx] # z x d
-        valid_mask = new_mask.permute(0,2,1).view(-1,1)[valid_idx] # z x 1
-        z = len(valid_idx)
-        rotate_idx = torch.arange(largest_n,device=valid_mask.device).long().repeat(torch.ceil(z/largest_n).long().item())[:z]
-        new_pos = cluster_pos.new(b,d,largest_n).zero_().long()
-        new_feat = cluster_feat.new(b,c,largest_n).zero_()
-        new_mask = cluster_feat.new(b,1,largest_n).zero_().long()
-        new_pos[batch_idx,:,rotate_idx] = valid_pos
-        new_feat[batch_idx,:,rotate_idx] = valid_feat
-        new_mask[batch_idx,:,rotate_idx] = valid_mask
-        if new_mask.min() == 1:
-            new_mask = None
-    return new_pos, new_feat, new_mask
+        mask = cluster_feat.new(b,n,1).zero_()
+        mask[batch_idx,member_idx] = new_mask.reshape(-1,1)
+    else:
+        mask = None
+    return pos, feat, mask
 
 def points2cluster(pos, feat, member_idx, cluster_mask):
     '''
@@ -101,11 +90,10 @@ def points2cluster(pos, feat, member_idx, cluster_mask):
     b,m,k = member_idx.shape
     _,c,n = feat.shape
     d = pos.shape[1]
-    batch_tmp = torch.arange(b,device=feat.device).long().unsqueeze(1).expand(-1,m*k)
-    member_idx = member_idx.view(b,-1)
-    member_idx = (batch_tmp*n+member_idx).view(-1)
-    cluster_pos = pos.permute(0,2,1).reshape(-1,d)[member_idx].reshape(b,m,k,d).permute(0,2,1,3).reshape(-1,m,d)
-    cluster_feat = feat.permute(0,2,1).reshape(-1,c)[member_idx].reshape(b,m,k,c).permute(0,2,1,3).reshape(-1,m,c)
+    batch_tmp = torch.arange(b,device=feat.device).long().unsqueeze(1).expand(-1,m*k).reshape(-1)
+    member_idx = member_idx.view(-1)
+    cluster_pos = pos.permute(0,2,1)[batch_tmp, member_idx].reshape(b,m,k,d).permute(0,2,1,3).reshape(-1,m,d)
+    cluster_feat = feat.permute(0,2,1)[batch_tmp, member_idx].reshape(b,m,k,c).permute(0,2,1,3).reshape(-1,m,c)
     # get valid cluster id
     irregular = cluster_mask is not None and cluster_mask.min() == 0
     if irregular:
