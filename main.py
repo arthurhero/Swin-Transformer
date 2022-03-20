@@ -181,6 +181,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             samples, targets = mixup_fn(samples, targets)
 
         outputs = model(samples)
+        #outputs = model(samples.to(torch.float32))
         if len(outputs)==2:
             outputs, gsms = outputs
         else:
@@ -195,7 +196,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             for gsm in gsms:
                 ds_loss += gsm
             ds_loss = ds_loss / config.TRAIN.ACCUMULATION_STEPS
-            total_loss = loss + ds_lambda * ds_loss
+            #total_loss = loss + ds_lambda * ds_loss
+            total_loss = loss
             if config.AMP_OPT_LEVEL != "O0":
                 with amp.scale_loss(total_loss, optimizer) as scaled_loss:
                     scaled_loss.backward()
@@ -218,7 +220,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             ds_loss = loss.new(1,).zero_()
             for gsm in gsms:
                 ds_loss += gsm
-            total_loss = loss + ds_lambda * ds_loss
+            #total_loss = loss + ds_lambda * ds_loss
+            total_loss = loss
             optimizer.zero_grad()
             if config.AMP_OPT_LEVEL != "O0":
                 with amp.scale_loss(total_loss, optimizer) as scaled_loss:
@@ -227,7 +230,11 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                     print("before bw max", torch.cuda.max_memory_allocated()/1024/1024, "mb")
                     '''
                     scaled_loss.backward()
-                    #print("grad",list(model.parameters())[0].grad.data)
+                    if torch.isinf(scaled_loss).any():
+                        print("scaled loss inf!!!, org loss", total_loss)
+                    for name, par in model.named_parameters():
+                        if torch.isinf(par.grad.data).any():
+                            print(name, "has inf!!!")
                     '''
                     print("after bw", torch.cuda.memory_allocated()/1024/1024, "mb")
                     print("after bw max", torch.cuda.max_memory_allocated()/1024/1024, "mb")
@@ -289,6 +296,7 @@ def validate(config, data_loader, model):
 
         # compute output
         output = model(images)
+        #output = model(images.to(torch.float32))
         if len(output)==2:
             output, _ = output
 
