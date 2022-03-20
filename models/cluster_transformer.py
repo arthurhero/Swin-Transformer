@@ -361,7 +361,7 @@ class BasicLayer(nn.Module):
             return new_pos, new_feat, mask
 
         # convert back to batches
-        new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, cluster_mask, valid_row_idx, b, self.k, filter_invalid=True)
+        new_pos, new_feat, new_mask = cluster2points(cluster_pos, cluster_feat, member_idx, cluster_mask, valid_row_idx, b, self.k, filter_invalid=True)
         '''
         if new_mask is not None:
             print('min kept point ratio before ds',new_mask.sum(-1).min() / n)

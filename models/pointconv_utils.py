@@ -67,15 +67,31 @@ def cluster2points(cluster_pos, cluster_feat, member_idx, cluster_mask, valid_ro
         new_pos = cluster_pos
         new_mask = cluster_mask 
 
-    member_idx = member_idx.permute(0,2,1).reshape(-1)
-    batch_idx = torch.arange(b,device=cluster_feat.device).long.unsqueeze(1).expand(-1,k*m).reshape(-1)
+    member_idx = member_idx.permute(0,2,1) # b x k x m
+    print("member idx shape", member_idx.shape)
+    min_uni=1024
+    for mi in member_idx:
+        uni = len(mi.unique())
+        if uni < min_uni:
+            min_uni=uni
+    print("min unique",min_uni)
+    if cluster_mask is not None:
+        print("clu mask shape",cluster_mask.shape)
+    member_idx = member_idx.reshape(-1)
+    batch_idx = torch.arange(b,device=cluster_feat.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1)
     feat = cluster_feat.new(b,n,c).zero_()
     feat[batch_idx,member_idx] = new_feat.reshape(-1,c)
+    feat = feat.permute(0,2,1)
     pos = cluster_pos.new(b,n,d).zero_()
     pos[batch_idx,member_idx] = new_pos.reshape(-1,d)
+    pos = pos.permute(0,2,1)
     if new_mask is not None:
-        mask = cluster_feat.new(b,n,1).zero_()
-        mask[batch_idx,member_idx] = new_mask.reshape(-1,1)
+        print("new mask sum", new_mask.sum()) 
+        mask = new_mask.new(b,n,1).zero_()
+        valid_idx = new_mask.reshape(-1).nonzero().reshape(-1)
+        mask[batch_idx[valid_idx],member_idx[valid_idx]] = new_mask.reshape(-1,1)[valid_idx]
+        mask = mask.permute(0,2,1)
+        print("num zero", len((mask==0).reshape(-1).nonzero().reshape(-1)))
     else:
         mask = None
     return pos, feat, mask
