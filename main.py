@@ -161,7 +161,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     num_steps = len(data_loader)
     batch_time = AverageMeter()
     loss_meter = AverageMeter()
-    ds_loss_meter = AverageMeter()
+    aux_loss_meter = AverageMeter()
     norm_meter = AverageMeter()
 
     img_sizes = [24,32,40]
@@ -183,21 +183,17 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         outputs = model(samples)
         #outputs = model(samples.to(torch.float32))
         if len(outputs)==2:
-            outputs, gsms = outputs
+            outputs, aux_loss = outputs
         else:
-            gsms = []
+            aux_loss = outputs.new(1,).zero_()
 
-        ds_lambda = 10.0
+        aux_lambda = 1.0
 
         if config.TRAIN.ACCUMULATION_STEPS > 1:
             loss = criterion(outputs, targets)
             loss = loss / config.TRAIN.ACCUMULATION_STEPS
-            ds_loss = loss.new(1,).zero_()
-            for gsm in gsms:
-                ds_loss += gsm
-            ds_loss = ds_loss / config.TRAIN.ACCUMULATION_STEPS
-            #total_loss = loss + ds_lambda * ds_loss
-            total_loss = loss
+            aux_loss = aux_loss / config.TRAIN.ACCUMULATION_STEPS
+            total_loss = loss + aux_lambda * aux_loss
             if config.AMP_OPT_LEVEL != "O0":
                 with amp.scale_loss(total_loss, optimizer) as scaled_loss:
                     scaled_loss.backward()
@@ -217,11 +213,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 lr_scheduler.step_update(epoch * num_steps + idx)
         else:
             loss = criterion(outputs, targets)
-            ds_loss = loss.new(1,).zero_()
-            for gsm in gsms:
-                ds_loss += gsm
-            #total_loss = loss + ds_lambda * ds_loss
-            total_loss = loss
+            total_loss = loss + aux_lambda * aux_loss
+            #total_loss = loss
             optimizer.zero_grad()
             if config.AMP_OPT_LEVEL != "O0":
                 with amp.scale_loss(total_loss, optimizer) as scaled_loss:
@@ -230,12 +223,12 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                     print("before bw max", torch.cuda.max_memory_allocated()/1024/1024, "mb")
                     '''
                     scaled_loss.backward()
+                    '''
                     if torch.isinf(scaled_loss).any():
                         print("scaled loss inf!!!, org loss", total_loss)
                     for name, par in model.named_parameters():
                         if torch.isinf(par.grad.data).any():
                             print(name, "has inf!!!")
-                    '''
                     print("after bw", torch.cuda.memory_allocated()/1024/1024, "mb")
                     print("after bw max", torch.cuda.max_memory_allocated()/1024/1024, "mb")
                     '''
@@ -255,7 +248,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         torch.cuda.synchronize()
 
         loss_meter.update(loss.item(), targets.size(0))
-        ds_loss_meter.update(ds_loss.item(), targets.size(0))
+        aux_loss_meter.update(aux_loss.item(), targets.size(0))
         norm_meter.update(grad_norm)
         batch_time.update(time.time() - end)
         end = time.time()
@@ -269,7 +262,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t'
                 f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
                 f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
-                f'ds_loss {ds_loss_meter.val:.4f} ({ds_loss_meter.avg:.4f})\t'
+                f'aux_loss {aux_loss_meter.val:.4f} ({aux_loss_meter.avg:.4f})\t'
                 f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
                 f'mem {memory_used:.0f}MB')
     epoch_time = time.time() - start
