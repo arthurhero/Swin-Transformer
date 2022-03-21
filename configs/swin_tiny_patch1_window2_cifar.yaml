@@ -1,6 +1,6 @@
 MODEL:
   TYPE: swin
-  NAME: swin_tiny_patch1_window2_cifar
+  NAME: swin_tiny_patch1_window2_cifar_tmp
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96

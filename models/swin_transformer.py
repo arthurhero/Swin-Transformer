@@ -132,7 +132,7 @@ class WindowAttention(nn.Module):
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
         B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, self.num_heads, 6, C // self.num_heads // 2).reshape(0,2,1,3,4)
+        qkv = self.qkv(x).reshape(B_, N, self.num_heads, 6, C // self.num_heads // 2).permute(0,2,1,3,4)
         q = qkv[:,:,:,0] # b' x h x n x c'
         k = qkv[:,:,:,1]
         v = qkv[:,:,:,2:].reshape(B_, self.num_heads, N, -1) # b' x h x n x 4*c'
