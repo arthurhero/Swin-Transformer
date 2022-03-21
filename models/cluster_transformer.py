@@ -60,8 +60,8 @@ class ClusterAttention(nn.Module):
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        #self.qkv = torch.nn.Conv1d(dim, dim * 3, 1, stride=1, groups=num_heads, bias=qkv_bias)
+        #self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.qkv = torch.nn.Conv1d(dim, dim * 3, 1, stride=1, groups=num_heads, bias=qkv_bias)
         #self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=pos_mlp_bias)
         self.pos_mlp = torch.nn.Conv1d(num_heads*pos_dim, num_heads, 1, stride=1, groups=num_heads, bias=pos_mlp_bias)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -93,8 +93,8 @@ class ClusterAttention(nn.Module):
         assert c == self.dim, "dim does not accord to input"
         assert d == self.pos_dim, "pos dim does not accord to input"
         c_ = c // h
-        #qkv = self.qkv(feat.reshape(b*n,c,1)).reshape(b,n,h,3,c_) # b x n x h x 3 x c_
-        qkv = self.qkv(feat).reshape(b,n,h,3,c_) # b x n x h x 3 x c_
+        qkv = self.qkv(feat.reshape(b*n,c,1)).reshape(b,n,h,3,c_) # b x n x h x 3 x c_
+        #qkv = self.qkv(feat).reshape(b,n,h,3,c_) # b x n x h x 3 x c_
         '''
         '''
         if member_idx is not None:
