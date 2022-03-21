@@ -118,7 +118,8 @@ class WindowAttention(nn.Module):
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
+        #self.proj = nn.Linear(dim, dim)
+        self.proj = nn.Linear(2*dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
         trunc_normal_(self.relative_position_bias_table, std=.02)
@@ -131,11 +132,14 @@ class WindowAttention(nn.Module):
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
         B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        qkv = self.qkv(x).reshape(B_, N, self.num_heads, 6, C // self.num_heads // 2).reshape(0,2,1,3,4)
+        q = qkv[:,:,:,0] # b' x h x n x c'
+        k = qkv[:,:,:,1]
+        v = qkv[:,:,:,2:].reshape(B_, self.num_heads, N, -1) # b' x h x n x 4*c'
+        #q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         q = q * self.scale
-        attn = (q @ k.transpose(-2, -1))
+        attn = (q @ k.transpose(-2, -1)) # b' x h x n x n
 
         old_window_size = self.window_size
         if old_window_size[0] != window_size[0]:
@@ -164,7 +168,8 @@ class WindowAttention(nn.Module):
 
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        #x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        x = (attn @ v).transpose(1, 2).reshape(B_, N, 2*C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
