@@ -118,8 +118,8 @@ class WindowAttention(nn.Module):
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        #self.proj = nn.Linear(dim, dim)
-        self.proj = nn.Linear(2*dim, dim)
+        self.weight_mlp = nn.Linear(dim//self.num_heads, 1)
+        self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
         trunc_normal_(self.relative_position_bias_table, std=.02)
@@ -135,8 +135,12 @@ class WindowAttention(nn.Module):
         qkv = self.qkv(x).reshape(B_, N, self.num_heads, 6, C // self.num_heads // 2).permute(0,2,1,3,4)
         q = qkv[:,:,:,0] # b' x h x n x c'
         k = qkv[:,:,:,1]
-        v = qkv[:,:,:,2:].reshape(B_, self.num_heads, N, -1) # b' x h x n x 4*c'
+        w = qkv[:,:,:,2:4].reshape(B_, self.num_heads, N, -1) # b' x h x n x 2*c'
+        v = qkv[:,:,:,4:].reshape(B_, self.num_heads, N, -1) # b' x h x n x 2*c'
         #q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+
+        # get weights
+        w = self.weight_mlp(w[:,:,None,:,:] - w[:,:,:,None,:]).squeeze(-1) # b' x h x n x n
 
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1)) # b' x h x n x n
@@ -158,17 +162,20 @@ class WindowAttention(nn.Module):
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
         attn = attn + relative_position_bias.unsqueeze(0)
 
+        '''
         # calculate corr loss
-        v_dist = (v[:,:,None,:,:] - v[:,:,:,None,:]).pow(2).sum(-1) # b' x h x n x n
+        #v_dist = (v[:,:,None,:,:] - v[:,:,:,None,:]).pow(2).sum(-1) # b' x h x n x n
+        v_dist = (v @ v.transpose(-1,-2)) # b' x h x n x n
         if mask is not None:
             nW = mask.shape[0]
             valid_idx = (mask.reshape(-1)==0).nonzero().reshape(-1)
-            v_dist = v_dist.reshape(B_ // nW, nW, self.num_heads, N, N).permute(0,2,1,4,5).reshape(B_ // nW, self.num_heads, -1)[:,:,valid_idx].reshape(-1)
-            attn_valid = attn.reshape(B_ // nW, nW, self.num_heads, N, N).permute(0,2,1,4,5).reshape(B_ // nW, self.num_heads, -1)[:,:,valid_idx].reshape(-1)
+            v_dist = v_dist.reshape(B_ // nW, nW, self.num_heads, N, N).permute(0,2,1,3,4).reshape(B_ // nW, self.num_heads, -1)[:,:,valid_idx].reshape(-1)
+            attn_valid = attn.reshape(B_ // nW, nW, self.num_heads, N, N).permute(0,2,1,3,4).reshape(B_ // nW, self.num_heads, -1)[:,:,valid_idx].reshape(-1)
         else:
             v_dist = v_dist.reshape(-1)
             attn_valid = attn.reshape(-1)
         corr_loss = -torch.corrcoef(torch.stack([v_dist,attn_valid],dim=0))[0,1]
+        '''
 
         if mask is not None:
             nW = mask.shape[0]
@@ -180,11 +187,13 @@ class WindowAttention(nn.Module):
 
         attn = self.attn_drop(attn)
 
-        #x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
-        x = (attn @ v).transpose(1, 2).reshape(B_, N, 2*C)
+        attn = attn * w
+
+        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x, corr_loss
+        #return x, corr_loss
+        return x
 
     def extra_repr(self) -> str:
         return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}'
@@ -294,8 +303,8 @@ class SwinTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
-        #attn_windows = self.attn(x_windows, to_2tuple(self.window_size), mask=attn_mask)  # nW*B, window_size*window_size, C
-        attn_windows, corr_loss = self.attn(x_windows, to_2tuple(self.window_size), mask=attn_mask)  # nW*B, window_size*window_size, C
+        attn_windows = self.attn(x_windows, to_2tuple(self.window_size), mask=attn_mask)  # nW*B, window_size*window_size, C
+        #attn_windows, corr_loss = self.attn(x_windows, to_2tuple(self.window_size), mask=attn_mask)  # nW*B, window_size*window_size, C
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
@@ -312,8 +321,8 @@ class SwinTransformerBlock(nn.Module):
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
-        #return x
-        return x, corr_loss
+        return x
+        #return x, corr_loss
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, num_heads={self.num_heads}, " \
@@ -437,17 +446,20 @@ class BasicLayer(nn.Module):
 
     def forward(self, x, input_resolution):
         self.input_resolution = input_resolution
-        corr_loss = x.new(1,).zero_()
+        #corr_loss = x.new(1,).zero_()
         for blk in self.blocks:
             if self.use_checkpoint:
-                x, cl = checkpoint.checkpoint(blk, x, input_resolution)
+                #x, cl = checkpoint.checkpoint(blk, x, input_resolution)
+                x = checkpoint.checkpoint(blk, x, input_resolution)
             else:
-                x, cl = blk(x, input_resolution)
-            corr_loss += cl
-        corr_loss /= len(self.blocks)
+                #x, cl = blk(x, input_resolution)
+                x = blk(x, input_resolution)
+            #corr_loss += cl
+        #corr_loss /= len(self.blocks)
         if self.downsample is not None:
             x = self.downsample(x, input_resolution)
-        return x, corr_loss
+        return x
+        #return x, corr_loss
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, depth={self.depth}"
@@ -480,7 +492,7 @@ class PatchEmbed(nn.Module):
         self.embed_dim = embed_dim
 
         #self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=3, stride=1, padding=1)
+        self.proj = nn.Conv2d(in_chans + 2, embed_dim, kernel_size=3, stride=1, padding=1)
         if norm_layer is not None:
             self.norm = norm_layer(embed_dim)
         else:
@@ -495,6 +507,17 @@ class PatchEmbed(nn.Module):
         self.img_size = img_size
         self.patches_resolution = patches_resolution
         self.num_patches = patches_resolution[0] * patches_resolution[1]
+
+        pos = x.new(B,2,H,W).zero_()
+        hs = torch.arange(0,H)
+        ws = torch.arange(0,W)
+        ys,xs = torch.meshgrid(hs,ws)
+        xs=xs.unsqueeze(0).expand(B,-1,-1)
+        ys=ys.unsqueeze(0).expand(B,-1,-1)
+        pos[:,0,:,:]=xs
+        pos[:,1,:,:]=ys
+        
+        x = torch.cat([x,pos],dim=1) # b x (c+2) x h x w
 
         x = self.proj(x).flatten(2).transpose(1, 2)  # B Ph*Pw C
         if self.norm is not None:
@@ -621,24 +644,28 @@ class SwinTransformer(nn.Module):
         patches_resolution = self.patch_embed.patches_resolution
         self.patches_resolution = patches_resolution
 
-        corr_loss = x.new(1,).zero_()
+        #corr_loss = x.new(1,).zero_()
         for i_layer in range(len(self.layers)):
             layer = self.layers[i_layer]
-            x, cl = layer(x,
+            #x, cl = layer(x,
+            x = layer(x,
                     input_resolution=(patches_resolution[0] // (2 ** i_layer),
                         patches_resolution[1] // (2 ** i_layer)))
-            corr_loss += cl
-        corr_loss /= len(self.layers)
+            #corr_loss += cl
+        #corr_loss /= len(self.layers)
 
         x = self.norm(x)  # B L C
         x = self.avgpool(x.transpose(1, 2))  # B C 1
         x = torch.flatten(x, 1)
-        return x, corr_loss
+        #return x, corr_loss
+        return x
 
     def forward(self, x):
-        x, corr_loss = self.forward_features(x)
+        #x, corr_loss = self.forward_features(x)
+        x= self.forward_features(x)
         x = self.head(x)
-        return x, corr_loss
+        #return x, corr_loss
+        return x
 
     def flops(self):
         flops = 0
