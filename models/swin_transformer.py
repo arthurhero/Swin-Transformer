@@ -118,7 +118,7 @@ class WindowAttention(nn.Module):
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.weight_mlp = nn.Linear(dim//self.num_heads, 1)
+        self.weight_mlp = nn.Linear(dim//self.num_heads, 4)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
@@ -140,7 +140,8 @@ class WindowAttention(nn.Module):
         #q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         # get weights
-        w = self.weight_mlp(w[:,:,None,:,:] - w[:,:,:,None,:]).squeeze(-1) # b' x h x n x n
+        #w = self.weight_mlp(w[:,:,None,:,:] - w[:,:,:,None,:]).squeeze(-1) # b' x h x n x n
+        w = self.weight_mlp(w[:,:,None,:,:] - w[:,:,:,None,:]).permute(0,1,4,2,3) # b' x h x l x n x n
 
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1)) # b' x h x n x n
@@ -187,9 +188,12 @@ class WindowAttention(nn.Module):
 
         attn = self.attn_drop(attn)
 
-        attn = attn * w
+        #attn = attn * w
+        w = attn.unsqueeze(2) * w # b x h x l x n x n
+        v = v.reshape(B_, self.num_heads, N, w.shape[2], v.shape[-1] // w.shape[2]).permute(0,1,3,2,4) # b' x h x l x n x (2*c'//l)
 
-        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        #x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        x = (w @ v).permute(0,3,1,2,4).reshape(B_, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         #return x, corr_loss
@@ -514,8 +518,8 @@ class PatchEmbed(nn.Module):
         ys,xs = torch.meshgrid(hs,ws)
         xs=xs.unsqueeze(0).expand(B,-1,-1)
         ys=ys.unsqueeze(0).expand(B,-1,-1)
-        pos[:,0,:,:]=xs
-        pos[:,1,:,:]=ys
+        pos[:,0,:,:]=xs / xs.max()
+        pos[:,1,:,:]=ys / ys.max()
         
         x = torch.cat([x,pos],dim=1) # b x (c+2) x h x w
 
