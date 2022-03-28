@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from .point_utils import points2img, kmeans_keops, cluster2points, points2cluster, batched_bincount
+from .point_utils import points2img, kmeans, cluster2points, points2cluster, batched_bincount
 import torch_scatter
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
@@ -60,8 +60,8 @@ class ClusterAttention(nn.Module):
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
 
-        #self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.qkv = torch.nn.Conv1d(dim, dim * 3, 1, stride=1, groups=num_heads, bias=qkv_bias)
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        #self.qkv = torch.nn.Conv1d(dim, dim * 3, 1, stride=1, groups=num_heads, bias=qkv_bias)
         #self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=pos_mlp_bias)
         self.pos_mlp = torch.nn.Conv1d(num_heads*pos_dim, num_heads, 1, stride=1, groups=num_heads, bias=pos_mlp_bias)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -93,8 +93,8 @@ class ClusterAttention(nn.Module):
         assert c == self.dim, "dim does not accord to input"
         assert d == self.pos_dim, "pos dim does not accord to input"
         c_ = c // h
-        qkv = self.qkv(feat.reshape(b*n,c,1)).reshape(b,n,h,3,c_) # b x n x h x 3 x c_
-        #qkv = self.qkv(feat).reshape(b,n,h,3,c_) # b x n x h x 3 x c_
+        #qkv = self.qkv(feat.reshape(b*n,c,1)).reshape(b,n,h,3,c_) # b x n x h x 3 x c_
+        qkv = self.qkv(feat).reshape(b,n,h,3,c_) # b x n x h x 3 x c_
         '''
         '''
         if member_idx is not None:
@@ -370,7 +370,7 @@ class ClusterMerging(nn.Module):
         k = int(math.ceil(n / 4.0)) # avg cluster size is 4
         pos_lambda = 100.0
         with torch.no_grad():
-            _, mean_assignment, member_idx, cluster_mask = kmeans_keops(feat, k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=pos_lambda, valid_mask=mask, init='random') # b x n x 1, b x k x m, b x k x m
+            _, mean_assignment, member_idx, cluster_mask = kmeans(feat, k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=pos_lambda, valid_mask=mask, init='random') # b x n x 1, b x k x m, b x k x m
         m = member_idx.shape[2]
         pos = pos.to(feat.dtype)
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
@@ -515,8 +515,8 @@ class BasicLayer(nn.Module):
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                _, _, member_idx, cluster_mask = kmeans_keops(feat_h, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos_h, pos_lambda=self.pos_lambda, valid_mask=mask_h, init='random') # (b*h) x k x m, (b*h) x k x m
-                #_, _, member_idx, cluster_mask = kmeans_keops(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random') # b x k x m, b x k x m
+                _, _, member_idx, cluster_mask = kmeans(feat_h, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos_h, pos_lambda=self.pos_lambda, valid_mask=mask_h, init='random',balanced=True) # (b*h) x k x m, (b*h) x k x m
+                #_, _, member_idx, cluster_mask = kmeans(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True) # b x k x m, b x k x m
             #print("zero cluster num", b*h*k - len(cluster_mask.sum(-1).reshape(-1).nonzero().reshape(-1)))
             member_idx = member_idx.reshape(b,h,k,member_idx.shape[-1])
         else:

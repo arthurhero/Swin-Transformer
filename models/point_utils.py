@@ -292,7 +292,7 @@ def init_kmeanspp(points, k, pos=None, pos_lambda=None, mask=None):
     else:
         return centers, None
 
-def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None, init='random', init_feat_means=None, init_pos_means=None, normalize=True):
+def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None, init='random', init_feat_means=None, init_pos_means=None, normalize=True, balanced=False):
     '''
     points - b x n x c
     k - number of means
@@ -304,6 +304,7 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     max_cluster_size - do random sampling in larger clusters; must be >= n/k
                  only affects reverse_assignment and valid_assignment_mask
     normalize - whether to normalize points to mean 0 std 1
+    balanced - try to balance the cluster sizes
     return
     means - b x k x c
     mean_assignment - b x n x num_nearest_mean
@@ -314,9 +315,10 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     points = points.detach()
     if pos is not None:
         pos = pos.detach()
-    old_dtype = points.dtype
-    points = points.to(torch.float32)
-    from pykeops.torch import LazyTensor
+    if not balanced:
+        old_dtype = points.dtype
+        points = points.to(torch.float32)
+        from pykeops.torch import LazyTensor
     b,n,c = points.shape
     if max_cluster_size is not None:
         assert max_cluster_size>= math.ceil(n/k), "max_cluster_size should not be smaller than average"
@@ -368,20 +370,33 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
 
     if valid_mask is not None:
         valid_mask = valid_mask.squeeze(2) # b x n
-    points_ = LazyTensor(points[:,:,None,:]) # b x n x 1 x c
-    means_ = LazyTensor(means[:,None,:,:]) # b x 1 x k x c
+    if balanced:
+        points_ = points[:,:,None,:] # b x n x 1 x c
+        means_ = means[:,None,:,:] # b x 1 x k x c
+    else:
+        points_ = LazyTensor(points[:,:,None,:]) # b x n x 1 x c
+        means_ = LazyTensor(means[:,None,:,:]) # b x 1 x k x c
     if pos is not None:
-        pos_ = LazyTensor(pos[:,:,None,:]) # b x n x 1 x d
-        means_pos_ = LazyTensor(means_pos[:,None,:,:]) # b x 1 x k x d
+        if balanced:
+            pos_ = pos[:,:,None,:] # b x n x 1 x d
+            means_pos_ = means_pos[:,None,:,:] # b x 1 x k x d
+        else:
+            pos_ = LazyTensor(pos[:,:,None,:]) # b x n x 1 x d
+            means_pos_ = LazyTensor(means_pos[:,None,:,:]) # b x 1 x k x d
 
+    if balanced:
+        cluster_scales = torch.ones(b,1,k, device=points.device) # b x 1 x k
     for i in range(num_iter):
         # find nearest mean
-        means_orig = means.clone()
         dist = ((points_ - means_) ** 2).sum(-1) # b x n x k
         if pos is not None:
             dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
             dist = dist + (pos_lambda / d * c) * dist_pos
-        mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
+        if balanced:
+            dist = dist * cluster_scales
+            mean_assignment = dist.argmin(dim=2,keepdim=True) # b x n x 1
+        else:
+            mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
 
         # re-compute the means
         means.zero_() # content of lazytensor will change with the original tensor
@@ -392,12 +407,18 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
             means_pos.zero_()
             means_pos.scatter_add_(dim=1, index=mean_assignment.expand(-1,-1,d), src=pos)
             means_pos /= bin_size.unsqueeze(2)
+        if balanced:
+            cluster_scales = bin_size.pow(2/c).unsqueeze(1)
 
     dist = ((points_ - means_) ** 2).sum(-1)
     if pos is not None:
         dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
         dist = dist + (pos_lambda / d * c) * dist_pos
-    mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
+    if balanced:
+        dist = dist * cluster_scales
+        mean_assignment = dist.argmin(dim=2,keepdim=True) # b x n x 1
+    else:
+        mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
 
     max_bin_size = int(batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item())
     if max_cluster_size is not None:
@@ -433,9 +454,13 @@ def kmeans_keops(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=
     reverse_assignment.clamp_(min=0)
     
     if num_nearest_mean > 1:
-        mean_assignment = dist.argKmin(num_nearest_mean,dim=2).long() # b x n x num_mean
+        if balanced:
+            mean_assignment = dist.topk(num_nearest_mean,dim=2,largest=False)[1] # b x n x num_mean
+        else:
+            mean_assignment = dist.argKmin(num_nearest_mean,dim=2).long() # b x n x num_mean
 
-    means = means.to(old_dtype)
+    if not balanced:
+        means = means.to(old_dtype)
     del points
     if pos is not None:
         del pos
