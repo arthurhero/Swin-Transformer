@@ -118,14 +118,16 @@ class WindowAttention(nn.Module):
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.weight_mlp = nn.Linear(dim//self.num_heads, 4)
-        self.proj = nn.Linear(dim, dim)
+        #self.weight_mlp = nn.Linear(dim//self.num_heads, 1)
+        #self.weight_mlp = nn.Linear(2, dim*2)
+        self.weight_mlp = nn.Linear(2, self.num_heads*4)
+        self.proj = nn.Linear(dim*2, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
         trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, x, window_size, mask=None):
+    def forward(self, B, x, window_size, mask=None):
         """
         Args:
             x: input features with shape of (num_windows*B, N, C)
@@ -135,13 +137,31 @@ class WindowAttention(nn.Module):
         qkv = self.qkv(x).reshape(B_, N, self.num_heads, 6, C // self.num_heads // 2).permute(0,2,1,3,4)
         q = qkv[:,:,:,0] # b' x h x n x c'
         k = qkv[:,:,:,1]
+        '''
         w = qkv[:,:,:,2:4].reshape(B_, self.num_heads, N, -1) # b' x h x n x 2*c'
         v = qkv[:,:,:,4:].reshape(B_, self.num_heads, N, -1) # b' x h x n x 2*c'
+        '''
+        v = qkv[:,:,:,2:].reshape(B_, self.num_heads, N, -1) # b' x h x n x 4*c'
         #q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         # get weights
         #w = self.weight_mlp(w[:,:,None,:,:] - w[:,:,:,None,:]).squeeze(-1) # b' x h x n x n
-        w = self.weight_mlp(w[:,:,None,:,:] - w[:,:,:,None,:]).permute(0,1,4,2,3) # b' x h x l x n x n
+        #w = self.weight_mlp(v[:,:,None,:,:] - v[:,:,:,None,:]).squeeze(-1) # b' x h x n x n
+        #w = self.weight_mlp(w[:,:,None,:,:] - w[:,:,:,None,:]).permute(0,1,4,2,3) # b' x h x l x n x n
+        #w = self.weight_mlp(v[:,:,None,:,:] - v[:,:,:,None,:]).permute(0,1,4,2,3) # b' x h x l x n x n
+        nW=B_ // B
+        H=int((nW**0.5)*window_size[0])
+        W=H
+        pos = x.new(B,2,H,W).zero_()
+        hs = torch.arange(0,H)
+        ws = torch.arange(0,W)
+        ys,xs = torch.meshgrid(hs,ws)
+        xs=xs.unsqueeze(0).expand(B,-1,-1)
+        ys=ys.unsqueeze(0).expand(B,-1,-1)
+        pos[:,0,:,:]=xs / xs.max()
+        pos[:,1,:,:]=ys / ys.max()
+        pos = window_partition(pos.permute(0,2,3,1), window_size[0]).reshape(B_,N,2) # b' x n x 2
+        w = self.weight_mlp(pos[:,None,:,:]-pos[:,:,None,:]).reshape(B_,N,N,self.num_heads,-1).permute(0,3,4,1,2) # b' x h x c x n x n
 
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1)) # b' x h x n x n
@@ -193,7 +213,7 @@ class WindowAttention(nn.Module):
         v = v.reshape(B_, self.num_heads, N, w.shape[2], v.shape[-1] // w.shape[2]).permute(0,1,3,2,4) # b' x h x l x n x (2*c'//l)
 
         #x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
-        x = (w @ v).permute(0,3,1,2,4).reshape(B_, N, C)
+        x = (w @ v).permute(0,3,1,2,4).reshape(B_, N, C*2)
         x = self.proj(x)
         x = self.proj_drop(x)
         #return x, corr_loss
@@ -307,7 +327,7 @@ class SwinTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, to_2tuple(self.window_size), mask=attn_mask)  # nW*B, window_size*window_size, C
+        attn_windows = self.attn(B, x_windows, to_2tuple(self.window_size), mask=attn_mask)  # nW*B, window_size*window_size, C
         #attn_windows, corr_loss = self.attn(x_windows, to_2tuple(self.window_size), mask=attn_mask)  # nW*B, window_size*window_size, C
 
         # merge windows
@@ -496,7 +516,8 @@ class PatchEmbed(nn.Module):
         self.embed_dim = embed_dim
 
         #self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.proj = nn.Conv2d(in_chans + 2, embed_dim, kernel_size=3, stride=1, padding=1)
+        #self.proj = nn.Conv2d(in_chans + 2, embed_dim, kernel_size=3, stride=1, padding=1)
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=3, stride=1, padding=1)
         if norm_layer is not None:
             self.norm = norm_layer(embed_dim)
         else:
@@ -512,6 +533,7 @@ class PatchEmbed(nn.Module):
         self.patches_resolution = patches_resolution
         self.num_patches = patches_resolution[0] * patches_resolution[1]
 
+        '''
         pos = x.new(B,2,H,W).zero_()
         hs = torch.arange(0,H)
         ws = torch.arange(0,W)
@@ -522,6 +544,7 @@ class PatchEmbed(nn.Module):
         pos[:,1,:,:]=ys / ys.max()
         
         x = torch.cat([x,pos],dim=1) # b x (c+2) x h x w
+        '''
 
         x = self.proj(x).flatten(2).transpose(1, 2)  # B Ph*Pw C
         if self.norm is not None:
