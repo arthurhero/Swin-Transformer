@@ -315,10 +315,9 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
     points = points.detach()
     if pos is not None:
         pos = pos.detach()
-    if not balanced:
-        old_dtype = points.dtype
-        points = points.to(torch.float32)
-        from pykeops.torch import LazyTensor
+    old_dtype = points.dtype
+    points = points.to(torch.float32)
+    from pykeops.torch import LazyTensor
     b,n,c = points.shape
     if max_cluster_size is not None:
         assert max_cluster_size>= math.ceil(n/k), "max_cluster_size should not be smaller than average"
@@ -368,59 +367,58 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
     elif init=='kmeans++':
         means, means_pos = init_kmeanspp(points, k, pos, pos_lambda, valid_mask) # b x k x c, b x k x d
 
+    means[means.isnan().nonzero(as_tuple=True)]=float('inf')
+    if pos is not None:
+        means_pos[means_pos.isnan().nonzero(as_tuple=True)]=float('inf')
+
     if valid_mask is not None:
         valid_mask = valid_mask.squeeze(2) # b x n
-    if balanced:
-        points_ = points[:,:,None,:] # b x n x 1 x c
-        means_ = means[:,None,:,:] # b x 1 x k x c
-    else:
-        points_ = LazyTensor(points[:,:,None,:]) # b x n x 1 x c
-        means_ = LazyTensor(means[:,None,:,:]) # b x 1 x k x c
+    points_ = LazyTensor(points[:,:,None,:]) # b x n x 1 x c
+    means_ = LazyTensor(means[:,None,:,:]) # b x 1 x k x c
     if pos is not None:
-        if balanced:
-            pos_ = pos[:,:,None,:] # b x n x 1 x d
-            means_pos_ = means_pos[:,None,:,:] # b x 1 x k x d
-        else:
-            pos_ = LazyTensor(pos[:,:,None,:]) # b x n x 1 x d
-            means_pos_ = LazyTensor(means_pos[:,None,:,:]) # b x 1 x k x d
+        pos_ = LazyTensor(pos[:,:,None,:]) # b x n x 1 x d
+        means_pos_ = LazyTensor(means_pos[:,None,:,:]) # b x 1 x k x d
 
-    if balanced:
-        cluster_scales = torch.ones(b,1,k, device=points.device) # b x 1 x k
     for i in range(num_iter):
         # find nearest mean
         dist = ((points_ - means_) ** 2).sum(-1) # b x n x k
         if pos is not None:
             dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
-            dist = dist + (pos_lambda / d * c) * dist_pos
-        if balanced:
-            dist = dist * cluster_scales
-            mean_assignment = dist.argmin(dim=2,keepdim=True) # b x n x 1
-        else:
-            mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
+            dist += (pos_lambda / d * c) * dist_pos
+        mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
 
         # re-compute the means
         means.zero_() # content of lazytensor will change with the original tensor
         means.scatter_add_(dim=1, index=mean_assignment.expand(-1,-1,c), src=points) # invalid points will contribute 0
         bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask, k) # b x k
         means /= bin_size.unsqueeze(2)
+        means[means.isnan().nonzero(as_tuple=True)]=float('inf')
         if pos is not None:
             means_pos.zero_()
             means_pos.scatter_add_(dim=1, index=mean_assignment.expand(-1,-1,d), src=pos)
             means_pos /= bin_size.unsqueeze(2)
+            means_pos[means_pos.isnan().nonzero(as_tuple=True)]=float('inf')
         if balanced:
-            cluster_scales = bin_size.pow(2/c).unsqueeze(1)
+            largest_idx=bin_size.argmax(dim=1) # b
+            smallest_idx=bin_size.argmin(dim=1) # b
+            bidx = torch.arange(b,device=points.device).long()
+            means[bidx,smallest_idx] = means[bidx,largest_idx].clone() + torch.randn(b,c,device=points.device)/100.0
+            if pos is not None:
+                means_pos[bidx,smallest_idx] = means_pos[bidx,largest_idx].clone() + torch.randn(b,d,device=points.device) / 100.0
 
     dist = ((points_ - means_) ** 2).sum(-1)
     if pos is not None:
         dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
-        dist = dist + (pos_lambda / d * c) * dist_pos
-    if balanced:
-        dist = dist * cluster_scales
-        mean_assignment = dist.argmin(dim=2,keepdim=True) # b x n x 1
-    else:
-        mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
+        dist += (pos_lambda / d * c) * dist_pos
+    mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
 
-    max_bin_size = int(batched_bincount(mean_assignment.squeeze(2), valid_mask).max().item())
+    
+    bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask)
+    max_bin_size = int(bin_size.max().item())
+    '''
+    print("max bin size",max_bin_size,n)
+    print("min bin size",bin_size.min().item(),n)
+    '''
     if max_cluster_size is not None:
         max_bin_size = min(max_cluster_size, max_bin_size)
     # get reverse_assignment
@@ -454,13 +452,9 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
     reverse_assignment.clamp_(min=0)
     
     if num_nearest_mean > 1:
-        if balanced:
-            mean_assignment = dist.topk(num_nearest_mean,dim=2,largest=False)[1] # b x n x num_mean
-        else:
-            mean_assignment = dist.argKmin(num_nearest_mean,dim=2).long() # b x n x num_mean
+        mean_assignment = dist.argKmin(num_nearest_mean,dim=2).long() # b x n x num_mean
 
-    if not balanced:
-        means = means.to(old_dtype)
+    means = means.to(old_dtype)
     del points
     if pos is not None:
         del pos

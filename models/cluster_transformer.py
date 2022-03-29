@@ -728,7 +728,7 @@ class ClusterTransformer(nn.Module):
     def forward(self, x):
         x, gsms = self.forward_features(x)
         x = self.head(x)
-        return x, gsms 
+        return x
 
     def flops(self):
         flops = 0
