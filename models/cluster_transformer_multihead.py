@@ -62,8 +62,8 @@ class ClusterAttention(nn.Module):
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         #self.qkv = torch.nn.Conv1d(dim, dim * 3, 1, stride=1, groups=num_heads, bias=qkv_bias)
-        self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=pos_mlp_bias)
-        #self.pos_mlp = torch.nn.Conv1d(num_heads*pos_dim, num_heads, 1, stride=1, groups=num_heads, bias=pos_mlp_bias)
+        #self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=pos_mlp_bias)
+        self.pos_mlp = torch.nn.Conv1d(num_heads*pos_dim, num_heads, 1, stride=1, groups=num_heads, bias=pos_mlp_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -80,11 +80,11 @@ class ClusterAttention(nn.Module):
         """
         b,n,c = feat.shape
         if member_idx is not None:
-            '''
             _,h,k,m = member_idx.shape
             '''
             _,k,m = member_idx.shape
             h = self.num_heads
+            '''
         else:
             h = self.num_heads
             k = 1
@@ -94,11 +94,10 @@ class ClusterAttention(nn.Module):
         assert d == self.pos_dim, "pos dim does not accord to input"
         c_ = c // h
         '''
+        '''
         #qkv = self.qkv(feat.reshape(b*n,c,1)).reshape(b,n,h,3,c_) # b x n x h x 3 x c_
         qkv = self.qkv(feat).reshape(b,n,h,3,c_) # b x n x h x 3 x c_
-        '''
         if member_idx is not None:
-            '''
             qkv = qkv.permute(3,0,2,1,4).reshape(3,b*h,n,c_) # 3 x b*h x n x c_
             member_idx = member_idx.reshape(-1) # b*h*k*m
             batch_idx = torch.arange(b*h,device=feat.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1) # b*h*k*m
@@ -108,12 +107,13 @@ class ClusterAttention(nn.Module):
             member_idx = member_idx.reshape(-1) # b*k*m
             batch_idx = torch.arange(b,device=feat.device).long().unsqueeze(1).expand(-1,k*m).reshape(-1) # b*k*m
             feat = feat[batch_idx,member_idx].clone().reshape(b*k,m,c)
-        else:
             '''
+        else:
             qkv = qkv.permute(3,0,2,1,4) # 3 x b x h x n x c_
             '''
             feat = feat
-        qkv = self.qkv(feat).reshape(b*k,m,h,3,c_).permute(3,0,2,1,4) # 3 x b*k x h x m x c_
+            '''
+        #qkv = self.qkv(feat).reshape(b*k,m,h,3,c_).permute(3,0,2,1,4) # 3 x b*k x h x m x c_
 
         q, key, v = qkv[0], qkv[1], qkv[2]  # b*k x h x m x c_
 
@@ -124,7 +124,6 @@ class ClusterAttention(nn.Module):
         pos = pos.to(feat.dtype)
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
 
-        '''
         pos = pos.unsqueeze(1).expand(-1,h,-1,-1)
         if member_idx is not None:
             pos = pos.reshape(b*h,n,d)[batch_idx,member_idx].clone() # b*h*k*m x d
@@ -137,11 +136,12 @@ class ClusterAttention(nn.Module):
             pos = pos[batch_idx,member_idx].clone().reshape(b,k,m,d).reshape(b*k,m,d)
         rel_pos = pos.unsqueeze(1) - pos.unsqueeze(2) # b*k x m x m x d
         pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # b*k x h x m x m
+        '''
 
         attn = attn + pos_bias 
         if cluster_mask is not None:
-            #mask = cluster_mask.reshape(b,h,k,m).permute(0,2,1,3).reshape(b*k,h,1,m)
-            mask = cluster_mask.reshape(b*k,1,1,m)
+            mask = cluster_mask.reshape(b,h,k,m).permute(0,2,1,3).reshape(b*k,h,1,m)
+            #mask = cluster_mask.reshape(b*k,1,1,m)
             '''
             mask = (mask.expand(-1,-1,m,-1) + torch.eye(m,device=mask.device,dtype=mask.dtype))
             mask = mask - (mask==2).to(mask.dtype)
@@ -154,15 +154,14 @@ class ClusterAttention(nn.Module):
 
         attn = self.attn_drop(attn)
 
-        #feat = (attn @ v).reshape(b,k,h,m,c_).permute(0,2,1,3,4).reshape(b*h*k*m,c_) # b*h*k*m x c_
-        feat = (attn @ v).reshape(b,k,h,m,c_).permute(0,1,3,2,4).reshape(b*k*m,c) # b*k*m x c
+        feat = (attn @ v).reshape(b,k,h,m,c_).permute(0,2,1,3,4).reshape(b*h*k*m,c_) # b*h*k*m x c_
+        #feat = (attn @ v).reshape(b,k,h,m,c_).permute(0,1,3,2,4).reshape(b*k*m,c) # b*k*m x c
         if member_idx is not None:
             if cluster_mask is not None:
                 valid_idx = cluster_mask.reshape(-1).nonzero().reshape(-1)
                 batch_idx = batch_idx[valid_idx]
                 member_idx = member_idx[valid_idx]
                 feat = feat[valid_idx]
-            '''
             new_feat = torch.zeros(b*h,n,c_, device=feat.device, dtype=feat.dtype)
             new_feat[batch_idx, member_idx] = feat
             feat = new_feat.reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c) # b x n x c
@@ -170,9 +169,10 @@ class ClusterAttention(nn.Module):
             new_feat = torch.zeros(b,n,c, device=feat.device, dtype=feat.dtype)
             new_feat[batch_idx, member_idx] = feat
             feat = new_feat
+            '''
         else:
-            #feat = feat.reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c)
-            feat = feat.reshape(b,n,c)
+            feat = feat.reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c)
+            #feat = feat.reshape(b,n,c)
         feat = self.proj(feat)
         feat = self.proj_drop(feat)
         return feat
@@ -403,7 +403,6 @@ class BasicLayer(nn.Module):
         assert self.cluster_size > 0, 'self.cluster_size must be positive'
         self.k = int(math.ceil(n / float(self.cluster_size)))
         k = self.k
-        '''
         feat_h = feat.reshape(b,n,h,c_).permute(0,2,1,3).reshape(-1,n,c_) # (b*h) x n x c_
         pos_h = pos.unsqueeze(1).expand(-1,h,-1,-1).reshape(-1,n,d) # (b*h) x n x d
         if mask is not None:
@@ -411,21 +410,22 @@ class BasicLayer(nn.Module):
         else:
             mask_h = None
         '''
+        '''
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                #_, _, member_idx, cluster_mask = kmeans(feat_h, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos_h, pos_lambda=self.pos_lambda, valid_mask=mask_h, init='random',balanced=True) # (b*h) x k x m, (b*h) x k x m
-                _, _, member_idx, cluster_mask = kmeans(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True) # b x k x m, b x k x m
+                _, _, member_idx, cluster_mask = kmeans(feat_h, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos_h, pos_lambda=self.pos_lambda, valid_mask=mask_h, init='random',balanced=True) # (b*h) x k x m, (b*h) x k x m
+                #_, _, member_idx, cluster_mask = kmeans(feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True) # b x k x m, b x k x m
             #print("zero cluster num", b*h*k - len(cluster_mask.sum(-1).reshape(-1).nonzero().reshape(-1)))
-            #member_idx = member_idx.reshape(b,h,k,member_idx.shape[-1])
+            member_idx = member_idx.reshape(b,h,k,member_idx.shape[-1])
         else:
             member_idx = None
+            '''
             cluster_mask = mask
             '''    
             cluster_mask = mask_h
             if mask_h is not None:
                 cluster_mask = mask_h.transpose(1,2) # (b*h) x 1 x n
-            '''
 
         for i_blk in range(len(self.blocks)):
             blk = self.blocks[i_blk]

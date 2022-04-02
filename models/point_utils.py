@@ -464,6 +464,7 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
                     chosen_prop = torch.zeros(len(overflow_idx),k,device=points.device)
                     chosen_prop[torch.arange(len(overflow_idx),device=points.device),chosen_prop_idx] = 1
                     mutual_choice.view(-1,k)[overflow_idx] = chosen_prop
+                    del chosen_prop
                 bidx, kidx = (mutual_choice.sum(1)<n//k).nonzero(as_tuple=True) # idx of too small cluster
                 bidx2, nidx = (prop_num==0).nonzero(as_tuple=True)
                 #print("num zero",len(nidx),ir)
