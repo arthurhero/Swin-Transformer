@@ -330,106 +330,6 @@ class PatchMerging(nn.Module):
         return flops
 
 
-class ClusterMerging(nn.Module):
-    r""" Cluster Merging Layer.
-
-    Args:
-        dim (int): Number of input channels.
-        pos_dim: dimension of x,y coordinates
-        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
-    """
-
-    def __init__(self, dim, pos_dim, norm_layer=nn.LayerNorm):
-        super().__init__()
-        self.dim = dim 
-        self.norm = norm_layer(dim+pos_dim)
-        self.linear = nn.Linear(dim+pos_dim, 2*dim, bias=False)
-        '''
-        self.act = nn.GELU()
-        self.linear2 = nn.Linear(2*pos_dim, dim*2*dim, bias=True)
-        '''
-
-    def forward(self, pos, feat, mask=None):
-        """ 
-        pos - b x n x d
-        feat - b x n x c
-        mask - b x n x 1
-        return
-        pos - b x n x d
-        feat - b x n x c
-        mask - b x n x 1
-        """
-        b,n,c = feat.shape
-        assert c == self.dim, "dim does not accord to input"
-        d = pos.shape[2]
-        if mask is not None:
-            pos = pos *  mask
-            feat = feat * mask
-        # kmeans on feat
-        k = int(math.ceil(n / 4.0)) # avg cluster size is 4
-        pos_lambda = 100.0
-        with torch.no_grad():
-            _, mean_assignment, member_idx, cluster_mask = kmeans(feat, k, num_nearest_mean=1, num_iter=5, pos=pos, pos_lambda=pos_lambda, valid_mask=mask, init='random', balanced=True) # b x n x 1, b x k x m, b x k x m
-        m = member_idx.shape[2]
-        pos = pos.to(feat.dtype)
-        pos = pos / pos.view(-1,d).max(0)[0] # normalize
-        mean_pos = torch.zeros(b,k,d,device = pos.device,dtype=pos.dtype)
-        mean_pos.scatter_add_(dim=1, index=mean_assignment.expand(-1,-1,d), src=pos)
-        if mask is not None:
-            count = batched_bincount(mean_assignment.squeeze(2), mask.squeeze(2), k) # b x k
-        else:
-            count = batched_bincount(mean_assignment.squeeze(2), None, k) # b x k
-        mean_pos = mean_pos / count.unsqueeze(2) # b x k x d
-        rel_pos = pos - mean_pos.gather(index=mean_assignment.expand(-1,-1,d), dim=1) # b x n x d
-
-        feat = self.norm(torch.cat([feat, rel_pos], dim=-1)) # b x n x (2+c)
-
-        feat = self.linear(feat) # b x n x 2c
-        
-        cluster_feat, cluster_mask, valid_row_idx = points2cluster(feat, None, member_idx, cluster_mask) # k' x m x c
-        count2 = cluster_mask.sum(1) # k' x 1
-        if valid_row_idx is not None:
-            count = count.view(-1)[valid_row_idx]
-        assert (count2.view(-1) == count.view(-1)).all(), 'counts does not fit'
-        count = count2
-
-        merged_feat = cluster_feat / count.unsqueeze(2)
-        merged_feat = merged_feat.sum(1) # k' x 2c
-
-        # convert back to batch shape 
-        if valid_row_idx is None:
-            new_mask = None
-            new_feat = merged_feat.reshape(b,k,2*c)
-            new_pos = mean_pos
-        else:
-            new_mask = torch.zeros(b*k,1,device = feat.device, dtype=merged_feat.dtype)
-            new_mask[valid_row_idx] = 1 
-            new_feat = torch.zeros(b*k,2*c,device = feat.device, dtype=merged_feat.dtype)
-            new_feat[valid_row_idx] = merged_feat
-            new_pos = torch.zeros(b*k,d,device = feat.device, dtype=mean_pos.dtype)
-            new_pos[valid_row_idx] = mean_pos.reshape(-1,d)[valid_row_idx]
-
-            new_mask = new_mask.reshape(b,k,1)
-            new_feat = new_feat.reshape(b,k,2*c)
-            new_pos = new_pos.reshape(b,k,d)
-
-        assert torch.isnan(new_pos).any() == False, "new pos has nan"
-        assert torch.isinf(new_pos).any() == False, "new pos has inf"
-        assert torch.isnan(new_feat).any() == False, "new feat has nan"
-        assert torch.isinf(new_feat).any() == False, "new feat has inf"
-        if new_mask is not None:
-            assert torch.isnan(new_mask).any() == False, "new mask has nan"
-            assert torch.isinf(new_mask).any() == False, "new mask has inf"
-        return new_pos, new_feat, new_mask
-
-    def extra_repr(self) -> str:
-        return f"dim={self.dim}"
-
-    def flops(self):
-        flops = 0
-        return flops
-
-
 class BasicLayer(nn.Module):
     """ A basic cluster Transformer layer for one stage.
 
@@ -634,7 +534,6 @@ class ClusterTransformer(nn.Module):
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, 
                  downsample=PatchMerging,
-                 #downsample=ClusterMerging,
                  use_checkpoint=False, **kwargs):
         super().__init__()
 
