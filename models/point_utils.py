@@ -374,6 +374,7 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
 
     if valid_mask is not None:
         valid_mask = valid_mask.squeeze(2) # b x n
+
     points_ = LazyTensor(points[:,:,None,:]) # b x n x 1 x c
     means_ = LazyTensor(means[:,None,:,:]) # b x 1 x k x c
     if pos is not None:
@@ -381,6 +382,7 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
         means_pos_ = LazyTensor(means_pos[:,None,:,:]) # b x 1 x k x d
 
     for i in range(num_iter):
+
         # find nearest mean
         dist = ((points_ - means_) ** 2).sum(-1) # b x n x k
         if pos is not None:
@@ -407,83 +409,88 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
             if pos is not None:
                 means_pos[bidx,smallest_idx] = means_pos[bidx,largest_idx].clone() + torch.randn(b,d,device=points.device) / 100.0
 
-    #start2 = time.time()
 
-    dist = ((points[:,:,None,:] - means[:,None,:,:]) ** 2).sum(-1) # b x n x k
-    if pos is not None:
-        dist_pos = ((pos[:,:,None,:] - means_pos[:,None,:,:]) ** 2).sum(-1) # b x n x k
-        dist += (pos_lambda / d * c) * dist_pos
-    dist_orig = dist.clone()
-
-    #mean_assignment0 = dist.argmin(dim=2,keepdim=True) # b x n x 1
-    #dist_overall0 = dist_orig.gather(dim=2,index=mean_assignment).mean()
-
-    member_grab = dist.topk(n//k,dim=1,largest=False)[1] # b x n/k x k
-    mutual_choice = torch.zeros(b,n,k,device=points.device)
-    mutual_choice.scatter_(index=member_grab, dim=1, src=torch.ones(b,n//k,k,device=points.device))
-    prop_num = mutual_choice.sum(2) # b x n
-    overflow_idx = (prop_num.view(-1) > 1).nonzero().view(-1) # idx of points have >1 proposals
-    if len(overflow_idx) > 0:
-        chosen_prop_idx = mutual_choice.view(-1,k)[overflow_idx].multinomial(1).squeeze(1) # z
-        chosen_prop = torch.zeros(len(overflow_idx),k,device=points.device)
-        chosen_prop[torch.arange(len(overflow_idx),device=points.device),chosen_prop_idx] = 1
-
-        '''    
-        mu_new = mutual_choice.clone()
-        mu_new.view(-1,k)[overflow_idx] = chosen_prop
-
-        bidx, _, kidx = (mutual_choice-mu_new).nonzero(as_tuple=True) # idx of too small cluster
-        bidx2, nidx = (prop_num==0).nonzero(as_tuple=True)
-        mutual_choice = mu_new
-        mutual_choice[bidx,nidx,kidx]=1
-
+    if not balanced:
+        dist = ((points_ - means_) ** 2).sum(-1) # b x n x k
+        if pos is not None:
+            dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
+            dist += (pos_lambda / d * c) * dist_pos
+        mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
+    else:
+        #start2 = time.time()
+        dist = ((points[:,:,None,:] - means[:,None,:,:]) ** 2).sum(-1) # b x n x k
+        if pos is not None:
+            dist_pos = ((pos[:,:,None,:] - means_pos[:,None,:,:]) ** 2).sum(-1) # b x n x k
+            dist += (pos_lambda / d * c) * dist_pos
+        dist_orig = dist.clone()
+        dist = dist / dist.sum(2,keepdim=True)
+ 
         '''
-        mutual_choice.view(-1,k)[overflow_idx] = chosen_prop
-        bidx, kidx = (mutual_choice.sum(1)<n//k).nonzero(as_tuple=True) # idx of too small cluster
-        bidx2, nidx = (prop_num==0).nonzero(as_tuple=True)
-        dist_inf = dist.new(dist.shape).zero_() + float('inf')
-        dist_inf[bidx2,nidx]=dist[bidx2,nidx]
-        dist = dist_inf
+        mean_assignment0 = dist.argmin(dim=2,keepdim=True) # b x n x 1
+        dist_overall0 = dist_orig.gather(dim=2,index=mean_assignment).mean()
+        print("avg dist 0", dist_overall0, n)
+        '''
  
-        ir=0
-        while True:
-            #print("round",ir,n)
-            start2 = time.time()
-            ir += 1
-            member_grab_num = int((n//k - mutual_choice.sum(1))[bidx,kidx].min().item())
-            assert member_grab_num > 0, "member grab num shoud be > 0"
+        member_grab = dist.topk(n//k,dim=1,largest=False)[1] # b x n/k x k
+        mutual_choice = torch.zeros(b,n,k,device=points.device)
+        mutual_choice.scatter_(index=member_grab, dim=1, src=torch.ones(b,n//k,k,device=points.device))
+        prop_num = mutual_choice.sum(2) # b x n
+        overflow_idx = (prop_num.view(-1) > 1).nonzero().view(-1) # idx of points have >1 proposals
+        if len(overflow_idx) > 0:
+            chosen_prop_idx = mutual_choice.view(-1,k)[overflow_idx].multinomial(1).squeeze(1) # z
+            chosen_prop = torch.zeros(len(overflow_idx),k,device=points.device)
+            chosen_prop[torch.arange(len(overflow_idx),device=points.device),chosen_prop_idx] = 1
  
-            member_grab = dist[bidx,:,kidx].topk(member_grab_num,dim=1,largest=False)[1].view(-1) # z*g
-            mutual_choice[bidx.repeat_interleave(member_grab_num),member_grab,kidx.repeat_interleave(member_grab_num)] = 1
-            prop_num = mutual_choice.sum(2) # b x n
-            overflow_idx = (prop_num.view(-1) > 1).nonzero().view(-1) # idx of points have >1 proposals
-            if len(overflow_idx)>0:
-                chosen_prop_idx = mutual_choice.view(-1,k)[overflow_idx].multinomial(1).squeeze(1) # z
-                chosen_prop = torch.zeros(len(overflow_idx),k,device=points.device)
-                chosen_prop[torch.arange(len(overflow_idx),device=points.device),chosen_prop_idx] = 1
-                mutual_choice.view(-1,k)[overflow_idx] = chosen_prop
+            mutual_choice.view(-1,k)[overflow_idx] = chosen_prop
             bidx, kidx = (mutual_choice.sum(1)<n//k).nonzero(as_tuple=True) # idx of too small cluster
             bidx2, nidx = (prop_num==0).nonzero(as_tuple=True)
-            if len(kidx)==0:
-                assert len(nidx)==0, "nidx must have no members"
-                end2 = time.time()
-                print("time",ir,end2-start2)
-                break
- 
             dist_inf = dist.new(dist.shape).zero_() + float('inf')
             dist_inf[bidx2,nidx]=dist[bidx2,nidx]
             dist = dist_inf
-            end2 = time.time()
-            print("time",ir,end2-start2)
-
-    '''
-    print("zero",(prop_num==0).long().sum(1)[:10])
-    print("zero total",(prop_num==0).long().sum())
-    '''
-    mean_assignment = mutual_choice.nonzero(as_tuple=True)[2].reshape(b,n,1) # b x n x 1
-    #end2 = time.time()
-    #dist_overall = dist_orig.gather(dim=2,index=mean_assignment).mean()
-    #print("avg dist", dist_overall)
+  
+            ir=0
+            max_round=11
+            while True:
+                ir += 1
+                member_grab_num = int((n//k - mutual_choice.sum(1))[bidx,kidx].min().item())
+                assert member_grab_num > 0, "member grab num shoud be > 0"
+  
+                member_grab = dist[bidx,:,kidx].topk(member_grab_num,dim=1,largest=False)[1].view(-1) # z*g
+                mutual_choice[bidx.repeat_interleave(member_grab_num),member_grab,kidx.repeat_interleave(member_grab_num)] = 1
+                prop_num = mutual_choice.sum(2) # b x n
+                overflow_idx = (prop_num.view(-1) > 1).nonzero().view(-1) # idx of points have >1 proposals
+                if len(overflow_idx)>0:
+                    chosen_prop_idx = mutual_choice.view(-1,k)[overflow_idx].multinomial(1).squeeze(1) # z
+                    chosen_prop = torch.zeros(len(overflow_idx),k,device=points.device)
+                    chosen_prop[torch.arange(len(overflow_idx),device=points.device),chosen_prop_idx] = 1
+                    mutual_choice.view(-1,k)[overflow_idx] = chosen_prop
+                bidx, kidx = (mutual_choice.sum(1)<n//k).nonzero(as_tuple=True) # idx of too small cluster
+                bidx2, nidx = (prop_num==0).nonzero(as_tuple=True)
+                #print("num zero",len(nidx),ir)
+                if len(kidx)==0:
+                    assert len(nidx)==0, "nidx must have no members"
+                    break
+                if max_round is not None and ir==max_round:
+                    num_repeats = (n//k-mutual_choice.sum(1))[bidx,kidx].long()
+                    bidx = bidx.repeat_interleave(num_repeats)
+                    kidx = kidx.repeat_interleave(num_repeats)
+                    mutual_choice[bidx,nidx,kidx]=1
+                    break
+  
+                dist_zero = dist.new(dist.shape).zero_()
+                dist_zero[bidx,:,kidx] = dist[bidx,:,kidx]
+                dist = dist_zero
+                dist = dist / dist.sum(2,keepdim=True)
+                dist_inf = dist.new(dist.shape).zero_() + float('inf')
+                dist_inf[bidx2,nidx]=dist[bidx2,nidx]
+                dist = dist_inf
+ 
+        mean_assignment = mutual_choice.nonzero(as_tuple=True)[2].reshape(b,n,1) # b x n x 1
+        #end2 = time.time()
+        '''
+        dist_overall = dist_orig.gather(dim=2,index=mean_assignment).mean()
+        print("avg dist", dist_overall, n)
+        '''
 
     bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask)
     max_bin_size = int(bin_size.max().item())
@@ -531,7 +538,7 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
     if pos is not None:
         del pos
     end1 = time.time()
-    print("time perc", (end2-start2) / (end1-start1))
+    #print("time perc", (end2-start2) / (end1-start1))
     
     return means, mean_assignment, reverse_assignment, valid_assignment_mask 
 

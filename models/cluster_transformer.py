@@ -369,7 +369,7 @@ class ClusterMerging(nn.Module):
         k = int(math.ceil(n / 4.0)) # avg cluster size is 4
         pos_lambda = 100.0
         with torch.no_grad():
-            _, mean_assignment, member_idx, cluster_mask = kmeans(feat, k, num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=pos_lambda, valid_mask=mask, init='random') # b x n x 1, b x k x m, b x k x m
+            _, mean_assignment, member_idx, cluster_mask = kmeans(feat, k, num_nearest_mean=1, num_iter=5, pos=pos, pos_lambda=pos_lambda, valid_mask=mask, init='random', balanced=True) # b x n x 1, b x k x m, b x k x m
         m = member_idx.shape[2]
         pos = pos.to(feat.dtype)
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
