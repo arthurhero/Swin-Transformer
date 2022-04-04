@@ -64,7 +64,7 @@ class ClusterAttention(nn.Module):
         #self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=pos_mlp_bias)
         self.pos_mlp = torch.nn.Conv1d(num_heads*pos_dim, num_heads, 1, stride=1, groups=num_heads, bias=pos_mlp_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
+        self.proj = nn.Linear(dim*2, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
         self.softmax = nn.Softmax(dim=-1)
@@ -85,9 +85,10 @@ class ClusterAttention(nn.Module):
         c_ = c // h
         m = n // k
 
-        qkv = self.qkv(feat).reshape(b,n,h,3,c_).permute(3,0,2,1,4).reshape(3,b*h,n,c_) # 3 x b*h x n x c_
+        #qkv = self.qkv(feat).reshape(b,n,h,3,c_).permute(3,0,2,1,4).reshape(3,b*h,n,c_) # 3 x b*h x n x c_
+        qkv = self.qkv(feat).reshape(b,n,h,6,c_//2).permute(0,2,1,3,4).reshape(b*h,n,6,c_//2) # b x h x n x 6 x c/2
 
-        key = qkv[1]  # b*h x n x c_
+        key = qkv[:,:,1] # b*h x n x c_/2
         pos = pos.repeat_interleave(h,dim=0) # b*h x n x d
         if mask is not None:
             mask = mask.repeat_interleave(h,dim=0) # b*h x n x 1
@@ -98,16 +99,24 @@ class ClusterAttention(nn.Module):
             m = member_idx.shape[-1]
             member_idx = member_idx.reshape(-1)
             batch_idx = torch.arange(b*h,device=feat.device).long().repeat_interleave(k*m) # b*h*k*m
+            '''
             qkv = qkv[:,batch_idx,member_idx].clone() # 3 x b*h*k*m x c_
             qkv = qkv.reshape(3,b,h,k,m,c_).permute(0,1,3,2,4,5).reshape(3,b*k,h,m,c_)
+            '''
+            qkv = qkv[batch_idx,member_idx].clone() # b*h*k*m x 6 x c_/2
+            qkv = qkv.reshape(b,h,k,m,6,c_//2).permute(0,2,1,3,4,5).reshape(b*k,h,m,6,c_//2)
             if cluster_mask is not None and cluster_mask.min() == 1:
                 cluster_mask = None
         else:
             member_idx = None
-            cluster_mask = mask_h
-            qkv = qkv.reshape(3,b,h,n,c_) # 3 x b x h x n x c_
+            cluster_mask = mask
+            #qkv = qkv.reshape(3,b,h,n,c_) # 3 x b x h x n x c_
+            qkv = qkv.reshape(b,h,n,6,c_//2) # b x h x n x 6 x c_/2
 
-        q, key, v = qkv[0], qkv[1], qkv[2]  # b*k x h x m x c_
+        #q, key, v = qkv[0], qkv[1], qkv[2]  # b*k x h x m x c_
+        q = qkv[:,:,:,0]
+        key = qkv[:,:,:,1]
+        v = qkv[:,:,:,2:].reshape(b*k,h,m,-1)
 
         q = q * self.scale
         attn = (q @ key.transpose(-2, -1)) # b*k x h x m x m
@@ -134,18 +143,18 @@ class ClusterAttention(nn.Module):
 
         attn = self.attn_drop(attn)
 
-        feat = (attn @ v).reshape(b,k,h,m,c_).permute(0,2,1,3,4).reshape(b*h*k*m,c_) # b*h*k*m x c_
+        feat = (attn @ v).reshape(b,k,h,m,c_*2).permute(0,2,1,3,4).reshape(b*h*k*m,c_*2) # b*h*k*m x c_*2
         if member_idx is not None:
             if cluster_mask is not None:
                 valid_idx = cluster_mask.reshape(-1).nonzero().reshape(-1)
                 batch_idx = batch_idx[valid_idx]
                 member_idx = member_idx[valid_idx]
                 feat = feat[valid_idx]
-            new_feat = torch.zeros(b*h,n,c_, device=feat.device, dtype=feat.dtype)
+            new_feat = torch.zeros(b*h,n,c_*2, device=feat.device, dtype=feat.dtype)
             new_feat[batch_idx, member_idx] = feat
-            feat = new_feat.reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c) # b x n x c
+            feat = new_feat.reshape(b,h,n,c_*2).permute(0,2,1,3).reshape(b,n,c*2) # b x n x c
         else:
-            feat = feat.reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c)
+            feat = feat.reshape(b,h,n,c_*2).permute(0,2,1,3).reshape(b,n,c*2)
         feat = self.proj(feat)
         feat = self.proj_drop(feat)
         return feat
