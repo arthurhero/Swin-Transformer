@@ -162,7 +162,7 @@ class ClusterTransformerBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, pos, feat, mask):
+    def forward(self, pos, feat, mask, member_idx, batch_idx, z, valid_row_idx):
         """
         Args:
             pos - b x n x d, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
@@ -175,16 +175,46 @@ class ClusterTransformerBlock(nn.Module):
         assert d == self.pos_dim, "pos dim does not accord to input"
 
         shortcut = feat 
-        x = self.norm1(feat)
+        feat = self.norm1(feat)
+
+        if member_idx is not None:
+            m = member_idx.shape[1]
+            member_idx = member_idx.reshape(-1) # z*m
+            batch_idx = batch_idx.reshape(-1) # z*m
+            feat = feat[batch_idx,member_idx].clone().reshape(z,m,c)
+            cluster_pos = pos[batch_idx,member_idx].clone().reshape(z,m,d)
+            if mask is not None:
+                cluster_mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
+            else:
+                cluster_mask = None
+        else:
+            cluster_pos = pos
+            cluster_mask = mask
 
         # cluster attention 
-        x = self.attn(pos, x, mask)
+        feat = self.attn(cluster_pos, feat, cluster_mask)
+
+        if member_idx is not None:
+            if valid_row_idx is not None:
+                member_idx = member_idx.reshape(z,m)
+                member_idx_ = member_idx.new(b*k,m).zero_() + n # elements from blank cluster will go to extra col
+                member_idx_[valid_row_idx] = member_idx
+                member_idx = member_idx_
+                feat_ = feat.new(b*k,m,c).zero_()
+                feat_[valid_row_idx] = feat
+                feat = feat_
+            member_idx = member_idx.reshape(b,-1) # b x k*m
+            feat = feat.reshape(b,-1,c) # b x k*m x c
+            new_feat = torch.zeros(b,n+1,c, device=feat.device, dtype=feat.dtype)
+            from torch_scatter import scatter_mean
+            new_feat = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat, out=new_feat)
+            feat = new_feat[:,:n] # b x n x c
 
         # FFN
-        x = shortcut + self.drop_path(x)
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        feat = shortcut + self.drop_path(feat)
+        feat = feat + self.drop_path(self.mlp(self.norm2(feat)))
 
-        return x
+        return feat
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, num_heads={self.num_heads}, " \
@@ -356,6 +386,7 @@ class BasicLayer(nn.Module):
                 batch_idx = batch_idx.reshape(b*k,m)[valid_row_idx] # z x m
             else:
                 z=b*k
+            '''
             member_idx = member_idx.reshape(-1) # z*m
             batch_idx = batch_idx.reshape(-1) # z*m
             feat = feat[batch_idx,member_idx].clone().reshape(z,m,c)
@@ -364,14 +395,21 @@ class BasicLayer(nn.Module):
                 cluster_mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
             else:
                 cluster_mask = None
+            '''
+        else:
+            member_idx = None
+            batch_idx = None
+            valid_row_idx = None
+            z = b
 
         for i_blk in range(len(self.blocks)):
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
-                feat = checkpoint.checkpoint(cluster_pos, feat, cluster_mask)
+                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, z, valid_row_idx)
             else:
-                feat = blk(cluster_pos, feat, cluster_mask)
+                feat = blk(pos, feat, mask,  member_idx, batch_idx, z, valid_row_idx)
 
+        '''
         if valid_row_idx is not None:
             member_idx = member_idx.reshape(z,m)
             member_idx_ = member_idx.new(b*k,m).zero_() + n # elements from blank cluster will go to extra col
@@ -386,6 +424,7 @@ class BasicLayer(nn.Module):
         from torch_scatter import scatter_mean
         new_feat = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat, out=new_feat)
         feat = new_feat[:,:n] # b x n x c
+        '''
         '''
         feat_ = feat.new(b,n,c).zero_()
         feat_[batch_idx,member_idx] = feat.reshape(-1,c)
