@@ -385,6 +385,11 @@ class BasicLayer(nn.Module):
         from torch_scatter import scatter_mean
         new_feat = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat, out=new_feat)
         feat = new_feat[:,:n] # b x n x c
+        '''
+        feat_ = feat.new(b,n,c).zero_()
+        feat_[batch_idx,member_idx] = feat.reshape(-1,c)
+        feat = feat_
+        '''
 
         if self.downsample is not None:
             pos, feat, mask = self.downsample(pos, feat, mask)
