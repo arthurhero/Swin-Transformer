@@ -81,6 +81,7 @@ class ClusterAttention(nn.Module):
         d = pos.shape[2]
         assert c == self.dim, "dim does not accord to input"
         assert d == self.pos_dim, "pos dim does not accord to input"
+        h = self.num_heads
         c_ = c // h
         qkv = self.qkv(feat).reshape(z,m,h,3,c_).permute(3,0,2,1,4) # 3 x z x h x m x c_
 
@@ -371,6 +372,7 @@ class BasicLayer(nn.Module):
                 feat = blk(cluster_pos, feat, cluster_mask)
 
         if valid_row_idx is not None:
+            member_idx = member_idx.reshape(z,m)
             member_idx_ = member_idx.new(b*k,m).zero_() + n # elements from blank cluster will go to extra col
             member_idx_[valid_row_idx] = member_idx
             member_idx = member_idx_
@@ -380,7 +382,8 @@ class BasicLayer(nn.Module):
         member_idx = member_idx.reshape(b,-1) # b x k*m
         feat = feat.reshape(b,-1,c) # b x k*m x c
         new_feat = torch.zeros(b,n+1,c, device=feat.device, dtype=feat.dtype)
-        new_feat.scatter_mean_(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat)
+        from torch_scatter import scatter_mean
+        new_feat = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat, out=new_feat)
         feat = new_feat[:,:n] # b x n x c
 
         if self.downsample is not None:
