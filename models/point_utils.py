@@ -292,12 +292,12 @@ def init_kmeanspp(points, k, pos=None, pos_lambda=None, mask=None):
     else:
         return centers, None
 
-def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None, init='random', init_feat_means=None, init_pos_means=None, normalize=True, balanced=False):
+def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos = None, pos_lambda=1, valid_mask=None, init='random', init_feat_means=None, init_pos_means=None, normalize=True, balanced=False, strictly_balanced=False, fillup=False):
     '''
     points - b x n x c
     k - number of means
     pos - postion of points, b x n x c
-    pos_lambda - lambda of pos in dist calculation
+    pos_lambda - lambda of pos in dist calculation, can be scalar or a list with length k
     valid_mask - b x n x 1, binary mask indicating the valid points
     init - method of initialization, kmeans++ or random
     init_feat_means - initialize using these means, b x k x c 
@@ -410,12 +410,52 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
                 means_pos[bidx,smallest_idx] = means_pos[bidx,largest_idx].clone() + torch.randn(b,d,device=points.device) / 100.0
 
 
-    if not balanced:
+    if not strictly_balanced:
         dist = ((points_ - means_) ** 2).sum(-1) # b x n x k
         if pos is not None:
             dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
             dist += (pos_lambda / d * c) * dist_pos
         mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
+        if fillup:
+            mutual_choice = torch.zeros(b,n,k,device=points.device)
+            mutual_choice.scatter_(index=mean_assignment, dim=2, src=torch.ones(b,n,1,device=points.device))
+            member_grab = dist.argKmin(max_cluster_size,dim=1).permute(0,2,1) # b x msc x k
+            mutual_choice.scatter_(index=member_grab, dim=1, src=torch.ones(b,max_cluster_size,k,device=points.device))
+            bin_size = mutual_choice.sum(1) # b x k 
+            # split clusters larger than max_cluster_size
+            large_bidx,large_kidx = (bin_size>max_cluster_size).nonzero(as_tuple=True)
+            if len(large_bidx)>0:
+                z = len(large_bidx)
+                large_rows = mutual_choice[large_bidx,:,large_kidx] # z x n
+                large_size = large_rows.sum(1) # z
+                largest_size = large_size.max().long().item()
+                _,ones_idx = large_rows.topk(largest_size,dim=1,sorted=True) # z x n'
+                left_split = torch.zeros(z,n,device=points.device)
+                right_split = torch.zeros(z,n,device=points.device)
+                left_split.scatter_(index=ones_idx[:,:max_cluster_size], dim=1, src=torch.ones(z,max_cluster_size,device=points.device))
+                right_idx_idx=torch.arange(max_cluster_size,device=points.device).unsqueeze(0).expand(z,-1)+large_size.unsqueeze(1)-max_cluster_size
+                right_idx = ones_idx.gather(index=right_idx_idx,dim=1) # z x msc
+                right_split.scatter_(index=right_idx, dim=1, src=torch.ones(z,max_cluster_size,device=points.device))
+                mutual_choice[large_bidx,:,large_kidx] = left_split
+
+                add_cluster_num = torch.bincount(large_bidx).max().long().item() # get the number of new clusters to add
+                rotate_idx = torch.arange(add_cluster_num,device=points.device).repeat(torch.ceil(z/add_cluster_num).long())[:z] # z
+                mutual_choice_expand = torch.zeros(b,n,k+add_cluster_num, device=mutual_choice.device)
+                mutual_choice_expand[:,:max_cluster_size] = -1
+                mutual_choice_expand[:,:,:k] = mutual_choice
+                mutual_choice_expand[large_bidx,:,rotate_idx+k] = right_split # b x n x k'
+                mutual_choice = mutual_choice_expand
+                valid_row_idx = (mutual_choice.sum(1).reshape(-1) > 0).nonzero().view(-1) 
+                if len(valid_row_idx)==b*(k+add_cluster_num):
+                    valid_row_idx = None
+            else:
+                valid_row_idx = None
+
+            # get member idx
+            # blank clusters will have 0:msc
+            member_idx = mutual_choice.permute(0,2,1).nonzero(as_tuple=True)[2].reshape(b,k+add_cluster_num,max_cluster_size) # b x k' x mcs
+            return None, None, member_idx, valid_row_idx
+
     else:
         #start2 = time.time()
         dist = ((points[:,:,None,:] - means[:,None,:,:]) ** 2).sum(-1) # b x n x k
