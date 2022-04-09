@@ -427,19 +427,19 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
             if len(large_bidx)>0:
                 z = len(large_bidx)
                 large_rows = mutual_choice[large_bidx,:,large_kidx] # z x n
-                large_size = large_rows.sum(1) # z
-                largest_size = large_size.max().long().item()
+                large_size = large_rows.sum(1).long() # z
+                largest_size = large_size.max().item()
                 _,ones_idx = large_rows.topk(largest_size,dim=1,sorted=True) # z x n'
                 left_split = torch.zeros(z,n,device=points.device)
                 right_split = torch.zeros(z,n,device=points.device)
                 left_split.scatter_(index=ones_idx[:,:max_cluster_size], dim=1, src=torch.ones(z,max_cluster_size,device=points.device))
-                right_idx_idx=torch.arange(max_cluster_size,device=points.device).unsqueeze(0).expand(z,-1)+large_size.unsqueeze(1)-max_cluster_size
+                right_idx_idx=torch.arange(max_cluster_size,device=points.device).long().unsqueeze(0).expand(z,-1)+large_size.unsqueeze(1)-max_cluster_size
                 right_idx = ones_idx.gather(index=right_idx_idx,dim=1) # z x msc
                 right_split.scatter_(index=right_idx, dim=1, src=torch.ones(z,max_cluster_size,device=points.device))
                 mutual_choice[large_bidx,:,large_kidx] = left_split
 
                 add_cluster_num = torch.bincount(large_bidx).max().long().item() # get the number of new clusters to add
-                rotate_idx = torch.arange(add_cluster_num,device=points.device).repeat(torch.ceil(z/add_cluster_num).long())[:z] # z
+                rotate_idx = torch.arange(add_cluster_num,device=points.device).long().repeat(int(math.ceil(z/add_cluster_num)))[:z] # z
                 mutual_choice_expand = torch.zeros(b,n,k+add_cluster_num, device=mutual_choice.device)
                 mutual_choice_expand[:,:max_cluster_size] = -1
                 mutual_choice_expand[:,:,:k] = mutual_choice
