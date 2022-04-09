@@ -420,7 +420,23 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
             mutual_choice = torch.zeros(b,n,k,device=points.device)
             mutual_choice.scatter_(index=mean_assignment, dim=2, src=torch.ones(b,n,1,device=points.device))
             member_grab = dist.argKmin(max_cluster_size,dim=1).permute(0,2,1) # b x msc x k
-            mutual_choice.scatter_(index=member_grab, dim=1, src=torch.ones(b,max_cluster_size,k,device=points.device))
+            mc_tmp = mutual_choice.clone()
+            mc_tmp.scatter_(index=member_grab, dim=1, src=torch.ones(b,max_cluster_size,k,device=points.device))
+            added_points = mc_tmp - mutual_choice # b x n x k
+
+            bin_size = mutual_choice.sum(1) # b x k 
+            added_num = added_points.sum(1) # b x k 
+            del_num = (added_num-(max_cluster_size-bin_size).clamp(min=0)).clamp(min=0)
+
+            del_src, added_points_idx = added_points.topk(added_num.max().long(),dim=1,sorted=True) # b x a x k
+            del_src2 = torch.arange(del_src.shape[1],device=del_src.device).reshape(1,-1,1).expand(b,-1,k) # b x a x k
+            del_src2 = (del_src2 >= del_num.unsqueeze(1)).to(del_src.dtype)
+            del_src *= del_src2
+            added_points.scatter_(index = added_points_idx, dim=1, src=del_src)
+            mutual_choice += added_points
+            mutual_choice.clamp_(max=1)
+            
+            #mutual_choice.scatter_(index=member_grab, dim=1, src=torch.ones(b,max_cluster_size,k,device=points.device))
             bin_size = mutual_choice.sum(1) # b x k 
             # split clusters larger than max_cluster_size
             large_bidx,large_kidx = (bin_size>max_cluster_size).nonzero(as_tuple=True)
@@ -449,6 +465,7 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
                 if len(valid_row_idx)==b*(k+add_cluster_num):
                     valid_row_idx = None
             else:
+                add_cluster_num=0
                 valid_row_idx = None
 
             # get member idx

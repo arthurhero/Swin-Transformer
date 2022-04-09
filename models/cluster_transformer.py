@@ -339,6 +339,7 @@ class BasicLayer(nn.Module):
         c = feat.shape[2]
         c_ = c // h
         assert self.cluster_size > 0, 'self.cluster_size must be positive'
+        self.cluster_size=12
         self.k = int(math.ceil(n / float(self.cluster_size)))
         k = self.k
         max_cluster_size = 16

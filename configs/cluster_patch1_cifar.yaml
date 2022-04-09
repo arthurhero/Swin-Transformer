@@ -1,6 +1,6 @@
 MODEL:
   TYPE: cluster
-  NAME: cluster_patch1_cifar_tmp2
+  NAME: cluster_patch1_cifar_tmp3
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96
