@@ -162,7 +162,7 @@ class ClusterTransformerBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, pos, feat, mask, member_idx, batch_idx, z, valid_row_idx):
+    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx):
         """
         Args:
             pos - b x n x d, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
@@ -178,7 +178,7 @@ class ClusterTransformerBlock(nn.Module):
         feat = self.norm1(feat)
 
         if member_idx is not None:
-            m = member_idx.shape[1]
+            z,m = member_idx.shape
             member_idx = member_idx.reshape(-1) # z*m
             batch_idx = batch_idx.reshape(-1) # z*m
             feat = feat[batch_idx,member_idx].clone().reshape(z,m,c)
@@ -348,10 +348,7 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
-            if downsample == PatchMerging:
-                self.downsample = downsample(dim=dim, norm_layer=norm_layer)
-            else:
-                self.downsample = downsample(dim=dim, pos_dim=pos_dim, norm_layer=norm_layer)
+            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
         else:
             self.downsample = None
 
@@ -405,9 +402,9 @@ class BasicLayer(nn.Module):
         for i_blk in range(len(self.blocks)):
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
-                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, z, valid_row_idx)
+                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx)
             else:
-                feat = blk(pos, feat, mask,  member_idx, batch_idx, z, valid_row_idx)
+                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx)
 
         '''
         if valid_row_idx is not None:
