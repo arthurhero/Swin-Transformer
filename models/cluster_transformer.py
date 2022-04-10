@@ -175,7 +175,7 @@ class ClusterTransformerBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means):
+    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means=False):
         """
         Args:
             pos - b x n x d, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
@@ -194,8 +194,8 @@ class ClusterTransformerBlock(nn.Module):
         feat = self.attn(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means)
 
         if member_idx is not None:
+            z,m=member_idx.shape
             if valid_row_idx is not None:
-                member_idx = member_idx.reshape(z,m)
                 member_idx_ = member_idx.new(b*k,m).zero_() + n # elements from blank cluster will go to extra col
                 member_idx_[valid_row_idx] = member_idx
                 member_idx = member_idx_
