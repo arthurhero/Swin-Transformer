@@ -207,8 +207,9 @@ class ClusterTransformerBlock(nn.Module):
 
         # cluster attention 
         feat = self.attn(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means)
+        print("attn, n",attend_means,n)
 
-        if member_idx is not None:
+        if not attend_means and member_idx is not None:
             z,m=member_idx.shape
             if valid_row_idx is not None:
                 member_idx_ = member_idx.new(b*k,m).zero_() + n # elements from blank cluster will go to extra col
