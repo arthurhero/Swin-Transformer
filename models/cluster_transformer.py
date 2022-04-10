@@ -84,6 +84,11 @@ class ClusterAttention(nn.Module):
         c_ = c // h
         #qkv = self.qkv(feat).reshape(z,m,h,3,c_).permute(3,0,2,1,4) # 3 x z x h x m x c_
         qkv = self.qkv(feat) # b x n x (3*c)
+        if attend_means:
+            qkv = qkv.reshape(b,n,3,c)
+            q = qkv[:,:,0]
+            kv = qkv[:,:,1:].reshape(b,n,-1)
+            qkv = kv
 
         if member_idx is not None:
             z,m = member_idx.shape
@@ -96,36 +101,46 @@ class ClusterAttention(nn.Module):
         else:
             z,m=b,n
 
-        qkv = qkv.reshape(z,m,h,3,c_).permute(3,0,2,1,4) # 3 x z x h x m x c_
+        if attend_means:
+            q = q.reshape(b,n,h,c_).permute(0,2,1,3) # b x h x n x c_
+            qkv = qkv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
+            kv = torch.zeros(2,b,k,h,c_,device=qkv.device)
+            rotate_idx = torch.arange(k,device=qkv.device).repeat(int(math.ceil(z/k)))[:z]
+            batch_idx = batch_idx.reshape(z,m)[:,0] # z
+            kv[:,batch_idx, rotate_idx] = qkv # 2 x b x k x h x c_
+            kv = kv.permute(0,1,3,2,4) # 2 x b x h x k x c_
+            mask = (kv!=0).long()[0,:,:,None,:,0] # b x h x 1 x k
+            key,v = qkv[0],qkv[1] # b x h x k x c_
 
-        q, key, v = qkv[0], qkv[1], qkv[2]  # z x h x m x c_
+        else:
+            qkv = qkv.reshape(z,m,3,h,c_).permute(2,0,3,1,4) # 3 x z x h x m x c_
+            q, key, v = qkv[0], qkv[1], qkv[2]  # z x h x m x c_
 
         q = q * self.scale
-        attn = (q @ key.transpose(-2, -1)) # z x h x m x m
+        attn = (q @ key.transpose(-2, -1)) # z x h x m x m / b x h x n x k
 
-        # calculate bias for pos
-        pos = pos.to(feat.dtype)
-        pos = pos / pos.view(-1,d).max(0)[0] # normalize
-
-        rel_pos = pos.unsqueeze(1) - pos.unsqueeze(2) # z x m x m x d
-        pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # z x h x m x m
-
-        attn = attn + pos_bias 
+        if not attend_means:
+            # calculate bias for pos
+            pos = pos.to(feat.dtype)
+            pos = pos / pos.view(-1,d).max(0)[0] # normalize
+         
+            rel_pos = pos.unsqueeze(1) - pos.unsqueeze(2) # z x m x m x d
+            pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # z x h x m x m
+         
+            attn = attn + pos_bias 
+            if mask is not None:
+                mask = mask.reshape(z,1,1,m)
         if mask is not None:
-            mask = mask.reshape(z,1,1,m)
-            '''
-            mask = (mask.expand(-1,-1,m,-1) + torch.eye(m,device=mask.device,dtype=mask.dtype))
-            mask = mask - (mask==2).to(mask.dtype)
-            assert mask.max()<=1 and mask.min()>=0, "not only 0 and 1 in mask"
-            assert mask.sum(-1).sum(-1).min()>0, "there should be 1 in every cluster!"
-            '''
             mask = (1-mask)*(-100) # 1->0, 0->-100
             attn = attn + mask
         attn = self.softmax(attn)
 
         attn = self.attn_drop(attn)
 
-        feat = (attn @ v).reshape(z,h,m,c_).permute(0,2,1,3).reshape(z,m,c) # z x m x c
+        if attend_means:
+            feat = (attn @ v).reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c)
+        else:
+            feat = (attn @ v).reshape(z,h,m,c_).permute(0,2,1,3).reshape(z,m,c) # z x m x c
         feat = self.proj(feat)
         feat = self.proj_drop(feat)
         return feat
@@ -175,7 +190,7 @@ class ClusterTransformerBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means=False):
+    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means):
         """
         Args:
             pos - b x n x d, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
@@ -401,9 +416,9 @@ class BasicLayer(nn.Module):
         for i_blk in range(len(self.blocks)):
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
-                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx)
+                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = 1-i_blk % 2)
             else:
-                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx)
+                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idxi, attend_means = 1-i_blk % 2)
 
         '''
         if valid_row_idx is not None:
