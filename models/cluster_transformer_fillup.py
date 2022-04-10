@@ -61,42 +61,29 @@ class ClusterAttention(nn.Module):
         self.scale = qk_scale or head_dim ** -0.5
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        #self.qkv = torch.nn.Conv1d(dim, dim * 3, 1, stride=1, groups=num_heads, bias=qkv_bias)
         self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=pos_mlp_bias)
+        #self.pos_mlp = torch.nn.Conv1d(num_heads*pos_dim, num_heads, 1, stride=1, groups=num_heads, bias=pos_mlp_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means):
+    def forward(self, pos, feat, mask):
         """
         Args:
             pos - z x m x d 
             feat - z x m x c 
             mask - z x m x 1
         """
-        b,n,c=feat.shape
+        z,m,c = feat.shape
         d = pos.shape[2]
         assert c == self.dim, "dim does not accord to input"
         assert d == self.pos_dim, "pos dim does not accord to input"
-
         h = self.num_heads
         c_ = c // h
-        #qkv = self.qkv(feat).reshape(z,m,h,3,c_).permute(3,0,2,1,4) # 3 x z x h x m x c_
-        qkv = self.qkv(feat) # b x n x (3*c)
-
-        if member_idx is not None:
-            z,m = member_idx.shape
-            member_idx = member_idx.reshape(-1) # z*m
-            batch_idx = batch_idx.reshape(-1) # z*m
-            qkv = qkv[batch_idx,member_idx].clone().reshape(z,m,-1)
-            pos = pos[batch_idx,member_idx].clone().reshape(z,m,d)
-            if mask is not None:
-                mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
-        else:
-            z,m=b,n
-
-        qkv = qkv.reshape(z,m,h,3,c_).permute(3,0,2,1,4) # 3 x z x h x m x c_
+        qkv = self.qkv(feat).reshape(z,m,h,3,c_).permute(3,0,2,1,4) # 3 x z x h x m x c_
 
         q, key, v = qkv[0], qkv[1], qkv[2]  # z x h x m x c_
 
@@ -175,7 +162,7 @@ class ClusterTransformerBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means):
+    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx):
         """
         Args:
             pos - b x n x d, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
@@ -190,8 +177,22 @@ class ClusterTransformerBlock(nn.Module):
         shortcut = feat 
         feat = self.norm1(feat)
 
+        if member_idx is not None:
+            z,m = member_idx.shape
+            member_idx = member_idx.reshape(-1) # z*m
+            batch_idx = batch_idx.reshape(-1) # z*m
+            feat = feat[batch_idx,member_idx].clone().reshape(z,m,c)
+            cluster_pos = pos[batch_idx,member_idx].clone().reshape(z,m,d)
+            if mask is not None:
+                cluster_mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
+            else:
+                cluster_mask = None
+        else:
+            cluster_pos = pos
+            cluster_mask = mask
+
         # cluster attention 
-        feat = self.attn(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means)
+        feat = self.attn(cluster_pos, feat, cluster_mask)
 
         if member_idx is not None:
             if valid_row_idx is not None:
