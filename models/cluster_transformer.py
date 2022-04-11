@@ -16,6 +16,7 @@ from .point_utils import points2img, kmeans, cluster2points, points2cluster, bat
 import torch_scatter
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+os.environ['TORCH_DISTRIBUTED_DEBUG'] = "INFO"
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
@@ -90,6 +91,10 @@ class ClusterAttention(nn.Module):
             kv = qkv[:,:,1:].reshape(b,n,-1)
             qkv = kv
 
+        pos = pos.to(feat.dtype)
+        pos = pos / pos.view(-1,d).max(0)[0] # normalize
+        pos_orig = pos.clone()
+
         if member_idx is not None:
             z,m = member_idx.shape
             member_idx = member_idx.reshape(-1) # z*m
@@ -104,13 +109,18 @@ class ClusterAttention(nn.Module):
         if attend_means:
             q = q.reshape(b,n,h,c_).permute(0,2,1,3) # b x h x n x c_
             qkv = qkv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
-            kv = torch.zeros(2,b,k,h,c_,device=qkv.device)
+            kv = qkv.new(b,k,2,h,c_).zero_()
             rotate_idx = torch.arange(k,device=qkv.device).repeat(int(math.ceil(z/k)))[:z]
             batch_idx = batch_idx.reshape(z,m)[:,0] # z
-            kv[:,batch_idx, rotate_idx] = qkv # 2 x b x k x h x c_
-            kv = kv.permute(0,1,3,2,4) # 2 x b x h x k x c_
+            kv[batch_idx, rotate_idx] = qkv # b x k x 2 x h x c_
+            kv = kv.permute(2,0,3,1,4) # 2 x b x h x k x c_
             mask = (kv!=0).long()[0,:,:,None,:,0] # b x h x 1 x k
-            key,v = qkv[0],qkv[1] # b x h x k x c_
+            key,v = kv[0],kv[1] # b x h x k x c_
+
+            pos = pos.mean(1) # z x d
+            pos_ = pos.new(b,k,d).zero_()
+            pos_[batch_idx,rotate_idx] = pos
+            pos = pos_
 
         else:
             qkv = qkv.reshape(z,m,3,h,c_).permute(2,0,3,1,4) # 3 x z x h x m x c_
@@ -119,18 +129,17 @@ class ClusterAttention(nn.Module):
         q = q * self.scale
         attn = (q @ key.transpose(-2, -1)) # z x h x m x m / b x h x n x k
 
+        # calculate bias for pos
         if not attend_means:
-            # calculate bias for pos
-            pos = pos.to(feat.dtype)
-            pos = pos / pos.view(-1,d).max(0)[0] # normalize
-         
             rel_pos = pos.unsqueeze(1) - pos.unsqueeze(2) # z x m x m x d
-            pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # z x h x m x m
-         
-            attn = attn + pos_bias 
-            if mask is not None:
-                mask = mask.reshape(z,1,1,m)
+        else:
+            rel_pos = pos[:,None,:,:] - pos_orig[:,:,None,:] # b x n x k x d
+        
+        pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # z x h x m x m
+        attn = attn + pos_bias 
         if mask is not None:
+            if not attend_means:
+                mask = mask.reshape(z,1,1,m)
             mask = (1-mask)*(-100) # 1->0, 0->-100
             attn = attn + mask
         attn = self.softmax(attn)
@@ -207,7 +216,6 @@ class ClusterTransformerBlock(nn.Module):
 
         # cluster attention 
         feat = self.attn(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means)
-        print("attn, n",attend_means,n)
 
         if not attend_means and member_idx is not None:
             z,m=member_idx.shape
@@ -417,9 +425,9 @@ class BasicLayer(nn.Module):
         for i_blk in range(len(self.blocks)):
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
-                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = 1-i_blk % 2)
+                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = i_blk % 2)
             else:
-                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idxi, attend_means = 1-i_blk % 2)
+                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = i_blk % 2)
 
         '''
         if valid_row_idx is not None:
