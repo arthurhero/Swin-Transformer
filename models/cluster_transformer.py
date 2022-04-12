@@ -85,6 +85,20 @@ class ClusterAttention(nn.Module):
         c_ = c // h
         #qkv = self.qkv(feat).reshape(z,m,h,3,c_).permute(3,0,2,1,4) # 3 x z x h x m x c_
         qkv = self.qkv(feat) # b x n x (3*c)
+
+        # transpose kq
+        qkv_ = qkv.reshape(b,n,3,h,c_)
+        q_,k_,v_ = qkv_[:,:,0], qkv_[:,:,1], qkv_[:,:,2]
+        q_ = q_ / q_.norm(2,dim=-1,keepdim=True)
+        k_ = k_ / k_.norm(2,dim=-1,keepdim=True)
+        qk_ = q_.permute(0,2,3,1) @ k_.permute(0,2,1,3) # b x h x c_ x c_
+        v_ = v_.permute(0,2,1,3) @ qk_ # b x h x n x c_
+        v_ = v_.permute(0,2,1,3).reshape(b,n,c)
+        qkv__ = qkv_.clone()
+        qkv__[:,:,2] = v_
+        qkv = qkv__.reshape(b,n,-1)
+
+
         if attend_means:
             qkv = qkv.reshape(b,n,3,c)
             q = qkv[:,:,0]
