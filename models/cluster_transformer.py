@@ -400,10 +400,12 @@ class BasicLayer(nn.Module):
             _,k,m = member_idx.shape
             self.k=k
             batch_idx = torch.arange(b,device=feat.device).long().repeat_interleave(k*m) # b*k*m
+            member_idx = member_idx.reshape(b*k,m)
+            batch_idx = batch_idx.reshape(b*k,m)
             if valid_row_idx is not None:
                 z = len(valid_row_idx)
-                member_idx = member_idx.reshape(b*k,m)[valid_row_idx] # z x m
-                batch_idx = batch_idx.reshape(b*k,m)[valid_row_idx] # z x m
+                member_idx = member_idx[valid_row_idx] # z x m
+                batch_idx = batch_idx[valid_row_idx] # z x m
             else:
                 z=b*k
             '''
