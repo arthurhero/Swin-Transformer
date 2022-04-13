@@ -69,6 +69,8 @@ class ClusterAttention(nn.Module):
 
         self.softmax = nn.Softmax(dim=-1)
 
+        self.tau = nn.Parameter(torch.Tensor([1.0]))
+
     def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means):
         """
         Args:
@@ -91,7 +93,9 @@ class ClusterAttention(nn.Module):
         q_,k_,v_ = qkv_[:,:,0], qkv_[:,:,1], qkv_[:,:,2]
         q_ = q_ / q_.norm(2,dim=-1,keepdim=True)
         k_ = k_ / k_.norm(2,dim=-1,keepdim=True)
-        qk_ = q_.permute(0,2,3,1) @ k_.permute(0,2,1,3) # b x h x c_ x c_
+        k_ = k_ / self.tau
+        kq_ = k_.permute(0,2,3,1) @ q_.permute(0,2,1,3) # b x h x c_ x c_
+        kq_ = self.softmax(kq_)
         v_ = v_.permute(0,2,1,3) @ qk_ # b x h x n x c_
         v_ = v_.permute(0,2,1,3).reshape(b,n,c)
         qkv__ = qkv_.clone()
