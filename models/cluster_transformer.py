@@ -71,6 +71,13 @@ class ClusterAttention(nn.Module):
 
         self.tau = nn.Parameter(torch.Tensor([1.0]))
 
+        # SE
+        self.se1 = nn.Linear(head_dim,head_dim)
+        self.se_norm = nn.LayerNorm(head_dim)
+        self.se_act = nn.GELU()
+        self.se2 = nn.Linear(head_dim,head_dim)
+        self.se_sig = nn.Sigmoid()
+
     def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means):
         """
         Args:
@@ -102,6 +109,14 @@ class ClusterAttention(nn.Module):
         qkv__[:,:,2] = v_
         qkv = qkv__.reshape(b,n,-1)
 
+        # SE
+        qkv_ = qkv.reshape(b,n,3,h,c_)
+        v_ = qkv_[:,:,2] # b x n x h x c_
+        s_ = self.se_sig(self.se2(self.se_act(self.se_norm(self.se1(v_.mean(1,keepdim=True)))))) # b x 1 x h x c_
+        v_ = v_ * s_ 
+        qkv__ = qkv_.clone()
+        qkv__[:,:,2] = v_
+        qkv = qkv__.reshape(b,n,-1)
 
         if attend_means:
             qkv = qkv.reshape(b,n,3,c)
@@ -264,6 +279,71 @@ class ClusterTransformerBlock(nn.Module):
     def flops(self):
         flops = 0
         return flops
+
+class ClusterMerging(nn.Module):
+    def __init__(self, dim, num_heads, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        act_layer=nn.GELU
+        self.norm = norm_layer(dim)
+        self.qkv = nn.Linear(dim, 3 * dim, bias=True)
+        self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=True)
+        self.proj = nn.Linear(dim, dim)
+
+        self.softmax = nn.Softmax(dim=-1)
+        self.norm2 = norm_layer(dim)
+        mlp_ratio = 1.0
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=0.0)
+        self.scale = head_dim ** -0.5
+
+    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx):
+        b,n,c = feat.shape
+        d = pos.shape[2]
+        feat = self.norm1(feat)
+
+        h = self.num_heads
+        c_ = c // h
+        qkv = self.qkv(feat) # b x n x (3*c)
+        pos = pos.to(feat.dtype)
+        pos = pos / pos.view(-1,d).max(0)[0] # normalize
+        pos_orig = pos.clone()
+
+        if member_idx is not None:
+            z,m = member_idx.shape
+            member_idx = member_idx.reshape(-1) # z*m
+            batch_idx = batch_idx.reshape(-1) # z*m
+            qkv = qkv[batch_idx,member_idx].clone().reshape(z,m,-1)
+            pos = pos[batch_idx,member_idx].clone().reshape(z,m,d)
+            if mask is not None:
+                mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
+        else:
+            z,m=b,n
+
+        qkv = qkv.reshape(z,m,3,h,c_).permute(2,0,3,1,4) # 3 x z x h x m x c_
+        q, key, v = qkv[0], qkv[1], qkv[2]  # z x h x m x c_
+        # downsample q
+        q = q[:,:,2::5] # get 3 from 16, z x h x m_ x c_
+        q = q * self.scale
+        attn = (q @ key.transpose(-2, -1)) # z x h x m_ x m 
+
+        rel_pos = pos.unsqueeze(1) - pos[:,2::5].unsqueeze(2) # z x m_ x m x d
+
+        pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # z x h x m_ x m
+        attn = attn + pos_bias
+        if mask is not None:
+            mask = mask.reshape(z,1,1,m)
+            mask = (1-mask)*(-100) # 1->0, 0->-100
+            attn = attn + mask
+        attn = self.softmax(attn)
+
+        feat = (attn @ v).reshape(z,h,-1,c_).permute(0,2,1,3).reshape(z,-1,c) # z x m_ x c
+        feat = self.proj(feat)
+
+        # revert back to row
+
 
 
 class PatchMerging(nn.Module):
