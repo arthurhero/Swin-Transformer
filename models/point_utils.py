@@ -425,6 +425,7 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
             added_points = mc_tmp - mutual_choice # b x n x k
 
             bin_size = mutual_choice.sum(1) # b x k 
+            assert bin_size.max() <= max_cluster_size * 2, "max bin size is over 2*msc!!"
             added_num = added_points.sum(1) # b x k 
             del_num = (added_num-(max_cluster_size-bin_size).clamp(min=0)).clamp(min=0)
 

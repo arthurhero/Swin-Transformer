@@ -69,9 +69,11 @@ class ClusterAttention(nn.Module):
 
         self.softmax = nn.Softmax(dim=-1)
 
-        self.tau = nn.Parameter(torch.Tensor([1.0]))
+        #self.tau = nn.Parameter(torch.Tensor([1.0]))
 
         # SE
+        '''
+        '''
         self.se1 = nn.Linear(head_dim,head_dim)
         self.se_norm = nn.LayerNorm(head_dim)
         self.se_act = nn.GELU()
@@ -96,6 +98,7 @@ class ClusterAttention(nn.Module):
         qkv = self.qkv(feat) # b x n x (3*c)
 
         # transpose kq
+        '''
         qkv_ = qkv.reshape(b,n,3,h,c_)
         q_,k_,v_ = qkv_[:,:,0], qkv_[:,:,1], qkv_[:,:,2]
         q_ = q_ / q_.norm(2,dim=-1,keepdim=True)
@@ -103,13 +106,16 @@ class ClusterAttention(nn.Module):
         k_ = k_ / self.tau
         kq_ = k_.permute(0,2,3,1) @ q_.permute(0,2,1,3) # b x h x c_ x c_
         kq_ = self.softmax(kq_)
-        v_ = v_.permute(0,2,1,3) @ qk_ # b x h x n x c_
-        v_ = v_.permute(0,2,1,3).reshape(b,n,c)
+        v_ = v_.permute(0,2,1,3) @ kq_ # b x h x n x c_
+        v_ = v_.permute(0,2,1,3)
         qkv__ = qkv_.clone()
         qkv__[:,:,2] = v_
         qkv = qkv__.reshape(b,n,-1)
+        '''
 
         # SE
+        '''
+        '''
         qkv_ = qkv.reshape(b,n,3,h,c_)
         v_ = qkv_[:,:,2] # b x n x h x c_
         s_ = self.se_sig(self.se2(self.se_act(self.se_norm(self.se1(v_.mean(1,keepdim=True)))))) # b x 1 x h x c_
