@@ -73,12 +73,12 @@ class ClusterAttention(nn.Module):
 
         # SE
         '''
-        '''
         self.se1 = nn.Linear(head_dim,head_dim)
         self.se_norm = nn.LayerNorm(head_dim)
         self.se_act = nn.GELU()
         self.se2 = nn.Linear(head_dim,head_dim)
         self.se_sig = nn.Sigmoid()
+        '''
 
     def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means):
         """
@@ -115,7 +115,6 @@ class ClusterAttention(nn.Module):
 
         # SE
         '''
-        '''
         qkv_ = qkv.reshape(b,n,3,h,c_)
         v_ = qkv_[:,:,2] # b x n x h x c_
         s_ = self.se_sig(self.se2(self.se_act(self.se_norm(self.se1(v_.mean(1,keepdim=True)))))) # b x 1 x h x c_
@@ -123,6 +122,7 @@ class ClusterAttention(nn.Module):
         qkv__ = qkv_.clone()
         qkv__[:,:,2] = v_
         qkv = qkv__.reshape(b,n,-1)
+        '''
 
         if attend_means:
             qkv = qkv.reshape(b,n,3,c)
@@ -147,7 +147,8 @@ class ClusterAttention(nn.Module):
 
         if attend_means:
             q = q.reshape(b,n,h,c_).permute(0,2,1,3) # b x h x n x c_
-            qkv = qkv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
+            #qkv = qkv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
+            qkv = qkv.reshape(z,m,2,h,c_).max(1)[0] # z x 2 x h x c_
             kv = qkv.new(b,k,2,h,c_).zero_()
             rotate_idx = torch.arange(k,device=qkv.device).repeat(int(math.ceil(z/k)))[:z]
             batch_idx = batch_idx.reshape(z,m)[:,0] # z
@@ -268,8 +269,12 @@ class ClusterTransformerBlock(nn.Module):
             member_idx = member_idx.reshape(b,-1) # b x k*m
             feat = feat.reshape(b,-1,c) # b x k*m x c
             new_feat = torch.zeros(b,n+1,c, device=feat.device, dtype=feat.dtype)
+            '''
             from torch_scatter import scatter_mean
             new_feat = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat, out=new_feat)
+            '''
+            from torch_scatter import scatter_max
+            new_feat = scatter_max(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat, out=new_feat)[0]
             feat = new_feat[:,:n] # b x n x c
 
         # FFN
