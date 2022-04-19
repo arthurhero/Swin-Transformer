@@ -147,8 +147,8 @@ class ClusterAttention(nn.Module):
 
         if attend_means:
             q = q.reshape(b,n,h,c_).permute(0,2,1,3) # b x h x n x c_
-            #qkv = qkv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
-            qkv = qkv.reshape(z,m,2,h,c_).max(1)[0] # z x 2 x h x c_
+            qkv = qkv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
+            #qkv = qkv.reshape(z,m,2,h,c_).max(1)[0] # z x 2 x h x c_
             kv = qkv.new(b,k,2,h,c_).zero_()
             rotate_idx = torch.arange(k,device=qkv.device).repeat(int(math.ceil(z/k)))[:z]
             batch_idx = batch_idx.reshape(z,m)[:,0] # z
@@ -269,12 +269,12 @@ class ClusterTransformerBlock(nn.Module):
             member_idx = member_idx.reshape(b,-1) # b x k*m
             feat = feat.reshape(b,-1,c) # b x k*m x c
             new_feat = torch.zeros(b,n+1,c, device=feat.device, dtype=feat.dtype)
-            '''
             from torch_scatter import scatter_mean
             new_feat = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat, out=new_feat)
             '''
             from torch_scatter import scatter_max
             new_feat = scatter_max(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat, out=new_feat)[0]
+            '''
             feat = new_feat[:,:n] # b x n x c
 
         # FFN
