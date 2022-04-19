@@ -505,7 +505,7 @@ class BasicLayer(nn.Module):
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                _, _, member_idx, valid_row_idx= kmeans(feat, self.k, max_cluster_size=max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=True) # b x k x m
+                _, _, member_idx, valid_row_idx= kmeans(feat[:,:,:c//3].contiguous(), self.k, max_cluster_size=max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=True) # b x k x m
             _,k,m = member_idx.shape
             self.k=k
             batch_idx = torch.arange(b,device=feat.device).long().repeat_interleave(k*m) # b*k*m
