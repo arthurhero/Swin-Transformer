@@ -450,61 +450,50 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
                 largest_size = large_size.max().item()
                 _,ones_idx = large_rows.topk(largest_size,dim=1,sorted=True) # z x n'
                 spacing = ((large_size - max_cluster_size) / (num_splits - 1)).long() # z
-                start_idx = torch.arange(max_num_splits,device=num_splits.device).long().unsqueeze(0).expand(z,-1) # z x ns
-                start_idx_valid1, start_idx_valid2 = (start_idx<num_splits.unsqueeze(1)).nonzero(as_tuple=True)
-                start_idx *= spacing.unsqueeze(1)
+                start_idx = torch.arange(max_num_splits,device=num_splits.device).long().unsqueeze(0).expand(z,-1) # z x mns
+                start_idx_valid1, start_idx_valid2 = (start_idx<num_splits.unsqueeze(1)).nonzero(as_tuple=True) # tns
+                start_idx = start_idx * spacing.unsqueeze(1)
                 start_idx[torch.arange(z,device=start_idx.device).long(),num_splits-1] = large_size - max_cluster_size # in case uneven division
-                start_batch_idx = torch.arange(z,device = start_idx.device).long.unsqueeze(1).expand(-1,start_idx.shape[1])
-                start_idx = start_idx[start_idx_valid1, start_idx_valid2] # total number of splits
+                start_batch_idx = torch.arange(z,device = start_idx.device).long().unsqueeze(1).expand(-1,max_num_splits)
+                start_idx = start_idx[start_idx_valid1, start_idx_valid2] # tns, total number of splits
                 start_batch_idx  = start_batch_idx[start_idx_valid1, start_idx_valid2]
-                total_num_splits = start_idx.shape[0]
+                total_num_splits = len(start_idx_valid1) 
                 assert total_num_splits == num_splits.sum(), "num splits incorrect!"
-                fetch_idx = torch.arange(max_cluster_size,device=start_idx.device).long().unsqueeze(0).expand(total_num_splits,-1)
-                fetch_idx += start_idx.unsqueeze(1)
+                fetch_idx = torch.arange(max_cluster_size,device=start_idx.device).long().unsqueeze(0).expand(total_num_splits,-1) # tns x mcs
+                fetch_idx = fetch_idx + start_idx.unsqueeze(1)
                 start_batch_idx = start_batch_idx.unsqueeze(1).expand(-1,max_cluster_size) # tns x mcs
                 fetched_points = ones_idx[start_batch_idx.view(-1),fetch_idx.view(-1)].reshape(total_num_splits, max_cluster_size) # tns x mcs
-                fetched_points_binary = torch.zeros(total_num_splits, n, device=fetched_points.device)
-                fetched_points_binary.scatter_(dim=1,index = fetched_points, src = torch.ones(fetched_points.shape,device=fetched_points.device)) # tns x n
-                fetched_points_z = torch.zeros(z, n, max_num_splits, device=fetched_points.device) 
-                fetched_points_z[start_idx_valid1,:,start_idx_valid2] = fetched_points_binary # z x n x mns
 
-                mutual_choice[large_bidx,:,large_kidx] = fetched_points_z[:,:,0] 
+                mutual_choice[large_bidx,:,large_kidx] = 0
+                mutual_choice[large_bidx,:max_cluster_size,large_kidx] = -1
+                member_idx = mutual_choice.permute(0,2,1).nonzero(as_tuple=True)[2].reshape(b,k,max_cluster_size) # b x k' x mcs
+
+                fetched_points_z = torch.zeros(z, max_cluster_size, max_num_splits, device=fetched_points.device) 
+                fetched_points_z[start_idx_valid1,:,start_idx_valid2] = fetched_points # z x mcs x mns
+                member_idx = [large_bidx,large_kidx] = fetched_points_z[:,:,0]
 
                 second_idx = (start_idx_valid2>0).nonzero().view(-1)
                 start_idx_valid1 = start_idx_valid1[second_idx]
                 start_idx_valid2 = start_idx_valid2[second_idx] # remove the first splits
-                fetched_points_binary = fetched_points_z[start_idx_valid1,:,start_idx_valid2] # (tns-z) x n
-                assert fetched_points_binary.shape[0]==total_num_splits-z
+                fetched_points = fetched_points_z[start_idx_valid1,:,start_idx_valid2] # (tns-z) x mcs
+                assert fetched_points.shape[0]==total_num_splits-z
+                assert len(start_idx_valid1)==total_num_splits-z
 
                 split_bidx = large_bidx[start_idx_valid1] # tns-z
                 add_cluster_num = torch.bincount(split_bidx).max().long().item() # get the number of new clusters to add
-                mutual_choice_expand = torch.zeros(b,n,k+add_cluster_num, device=mutual_choice.device)
-                mutual_choice_expand[:,:max_cluster_size] = -1
-                mutual_choice_expand[:,:,:k] = mutual_choice
-                rotate_idx = torch.arange(add_cluster_num,device=points.device).long().repeat(int(math.ceil((total_num_splits-z)/add_cluster_num)))[:(total_num_splits-z)] # tns - z
+                member_idx_expand = torch.zeros(b,k+add_cluster_num,max_cluster_size, device=member_idx.device, dtype=member_idx.dtype) - 1
+                member_idx_expand[:,:k] = member_idx 
+                rotate_idx = torch.arange(add_cluster_num,device=member_idx.device).long().repeat(int(math.ceil((total_num_splits-z)/add_cluster_num)))[:(total_num_splits-z)] # tns - z
+                member_idx_expand[split_bidx,rotate_idx+k] = fetched_points # b x k' x mcs
+                member_idx = member_idx_expand 
 
-                fetched_points_batch = torch.zeros(b, n, max_num_splits, device=fetched_points.device) 
-                fetched_points_batch[split_bidx,:,rotate_idx] = fetched_points_binary # b x n x mns
-
-                mutual_choice[large_bidx,:,large_kidx] = fetched_points_batch 
-
-                add_cluster_num = torch.bincount(large_bidx).max().long().item() # get the number of new clusters to add
-                rotate_idx = torch.arange(add_cluster_num,device=points.device).long().repeat(int(math.ceil(z/add_cluster_num)))[:z] # z
-                mutual_choice_expand = torch.zeros(b,n,k+add_cluster_num, device=mutual_choice.device)
-                mutual_choice_expand[:,:max_cluster_size] = -1
-                mutual_choice_expand[:,:,:k] = mutual_choice
-                mutual_choice_expand[large_bidx,:,rotate_idx+k] = right_split # b x n x k'
-                mutual_choice = mutual_choice_expand
-                valid_row_idx = (mutual_choice.sum(1).reshape(-1) > 0).nonzero().view(-1) 
+                valid_row_idx = (member_idx.sum(-1).reshape(-1) > 0).nonzero().view(-1) 
                 if len(valid_row_idx)==b*(k+add_cluster_num):
                     valid_row_idx = None
+                member_idx.clamp_(min=0)
             else:
-                add_cluster_num=0
                 valid_row_idx = None
-
-            # get member idx
-            # blank clusters will have 0:msc
-            member_idx = mutual_choice.permute(0,2,1).nonzero(as_tuple=True)[2].reshape(b,k+add_cluster_num,max_cluster_size) # b x k' x mcs
+                member_idx = mutual_choice.permute(0,2,1).nonzero(as_tuple=True)[2].reshape(b,k,max_cluster_size) # b x k x mcs
             return None, None, member_idx, valid_row_idx
 
     else:
