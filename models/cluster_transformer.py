@@ -296,19 +296,22 @@ class ClusterMerging(nn.Module):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
+        self.scale = head_dim ** -0.5
         head_dim = dim // num_heads
         act_layer=nn.GELU
+
         self.norm = norm_layer(dim)
         self.qkv = nn.Linear(dim, 3 * dim, bias=True)
         self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=True)
-        self.proj = nn.Linear(dim, dim)
-
         self.softmax = nn.Softmax(dim=-1)
+        self.proj = nn.Linear(dim, 2*dim)
+
+        '''
         self.norm2 = norm_layer(dim)
         mlp_ratio = 1.0
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=0.0)
-        self.scale = head_dim ** -0.5
+        '''
 
     def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx):
         b,n,c = feat.shape
@@ -336,11 +339,17 @@ class ClusterMerging(nn.Module):
         qkv = qkv.reshape(z,m,3,h,c_).permute(2,0,3,1,4) # 3 x z x h x m x c_
         q, key, v = qkv[0], qkv[1], qkv[2]  # z x h x m x c_
         # downsample q
+        # TODO: remove hard coded
         q = q[:,:,2::5] # get 3 from 16, z x h x m_ x c_
+        m_ = q.shape[2]
+        pos_ds = pos[:,2::5]
+        if mask is not None:
+            mask_ds = mask[:,2::5]
+
         q = q * self.scale
         attn = (q @ key.transpose(-2, -1)) # z x h x m_ x m 
 
-        rel_pos = pos.unsqueeze(1) - pos[:,2::5].unsqueeze(2) # z x m_ x m x d
+        rel_pos = pos.unsqueeze(1) - pos_ds.unsqueeze(2) # z x m_ x m x d
 
         pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # z x h x m_ x m
         attn = attn + pos_bias
@@ -351,9 +360,61 @@ class ClusterMerging(nn.Module):
         attn = self.softmax(attn)
 
         feat = (attn @ v).reshape(z,h,-1,c_).permute(0,2,1,3).reshape(z,-1,c) # z x m_ x c
-        feat = self.proj(feat)
+        feat = self.proj(feat) # z x m_ x 2c
 
         # revert back to row
+        if member_idx is not None:
+            member_idx = member_idx.reshape(z,m)
+            member_idx = member_idx[:,2::5] # z x m_
+            if valid_row_idx is not None:
+                member_idx_ = member_idx.new(b*k,m_).zero_() + n # elements from blank cluster will go to extra col
+                member_idx_[valid_row_idx] = member_idx
+                member_idx = member_idx_
+                feat_ = feat.new(b*k,m_,2*c).zero_()
+                feat_[valid_row_idx] = feat
+                feat = feat_
+                pos_ = pos.new(b*k,m_,d).zero_()
+                pos_[valid_row_idx] = pos_ds
+                pos = pos_
+                if mask is not None:
+                    mask_ = mask.new(b*k,m_,1).zero_()
+                    mask_[valid_row_idx] = mask_ds
+                    mask = mask_
+            member_idx = member_idx.reshape(b,-1) # b x k*m_
+            # shrink the point idx
+            sort_val, sort_idx = member_idx.sort(dim=-1) # b x k*m_
+            sort_right_shift = sort_var.new(sort_val.shape)
+            sort_right_shift[:,1:] = sort_val[:,:-1].clone()
+            sort_right_shift[:,0] = sort_val[:,0].clone()
+            new_idx = ((sort_val - sort_right_shift) != 0).long().cumsum(dim=-1) # b x k*m_
+            member_idx = member_idx.clone()
+            member_idx.scatter_(index=sort_idx, dim=-1, src=new_idx)
+            if valid_row_idx is not None:
+                n = member_idx.max() # new row size
+            else:
+                n = member_idx.max() + 1
+
+            feat = feat.reshape(b,-1,2*c) # b x k*m_ x 2c
+            pos = pos.reshape(b,-1,d) # b x k*m_ x d
+            if mask is not None:
+                mask = mask.reshape(b,-1,1) # b x k*m_ x 1
+            from torch_scatter import scatter_mean
+            new_feat = torch.zeros(b,n+1,2*c, device=feat.device, dtype=feat.dtype)
+            new_feat = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,2*c),dim=1,src=feat, out=new_feat)
+            feat = new_feat[:,:n] # b x n' x 2*c
+            new_pos = torch.zeros(b,n+1,d, device=pos.device, dtype=pos.dtype)
+            new_pos = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,d),dim=1,src=pos, out=new_pos)
+            pos = new_pos[:,:n] # b x n' x d
+            if mask is not None:
+                new_mask = torch.zeros(b,n+1,1, device=mask.device, dtype=mask.dtype)
+                new_mask = scatter_mean(index=member_idx.unsqueeze(-1),dim=1,src=mask, out=new_mask)
+                mask = new_mask[:,:n] # b x n' x 1
+        else:
+            pos = pos_ds
+            if mask is not None:
+                mask = mask_ds
+
+        return pos, feat, mask
 
 
 
