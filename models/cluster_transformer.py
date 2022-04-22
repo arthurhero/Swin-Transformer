@@ -80,7 +80,7 @@ class ClusterAttention(nn.Module):
         self.se_sig = nn.Sigmoid()
         '''
 
-    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means):
+    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
         """
         Args:
             pos - z x m x d 
@@ -140,7 +140,9 @@ class ClusterAttention(nn.Module):
             batch_idx = batch_idx.reshape(-1) # z*m
             qkv = qkv[batch_idx,member_idx].clone().reshape(z,m,-1)
             pos = pos[batch_idx,member_idx].clone().reshape(z,m,d)
-            if mask is not None:
+            if cluster_mask is not None:
+                mask = cluster_mask.unsqueeze(-1)
+            elif mask is not None:
                 mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
         else:
             z,m=b,n
@@ -239,7 +241,7 @@ class ClusterTransformerBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means):
+    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
         """
         Args:
             pos - b x n x d, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
@@ -255,10 +257,13 @@ class ClusterTransformerBlock(nn.Module):
         feat = self.norm1(feat)
 
         # cluster attention 
-        feat = self.attn(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means)
+        feat = self.attn(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=cluster_mask)
 
         if not attend_means and member_idx is not None:
             z,m=member_idx.shape
+            if cluster_mask is not None:
+                member_idx = member_idx * cluster_mask
+                member_idx = (1-cluster_mask)*n + member_idx
             if valid_row_idx is not None:
                 member_idx_ = member_idx.new(b*k,m).zero_() + n # elements from blank cluster will go to extra col
                 member_idx_[valid_row_idx] = member_idx
@@ -566,18 +571,24 @@ class BasicLayer(nn.Module):
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                _, _, member_idx, valid_row_idx= kmeans(feat[:,:,:c//3].contiguous(), self.k, max_cluster_size=max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=True) # b x k x m
+                _, _, member_idx, valid_row_idx= kmeans(feat[:,:,:c//3].contiguous(), self.k, max_cluster_size=max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=False) # b x k x m
             _,k,m = member_idx.shape
             self.k=k
             batch_idx = torch.arange(b,device=feat.device).long().repeat_interleave(k*m) # b*k*m
             member_idx = member_idx.reshape(b*k,m)
             batch_idx = batch_idx.reshape(b*k,m)
-            if valid_row_idx is not None:
+            if len(valid_row_idx)>1:
+                cluster_mask = valid_row_idx.reshape(-1,m)
+                valid_row_idx=None
+                z=b*k
+            elif valid_row_idx is not None:
                 z = len(valid_row_idx)
                 member_idx = member_idx[valid_row_idx] # z x m
                 batch_idx = batch_idx[valid_row_idx] # z x m
+                cluster_mask=None
             else:
                 z=b*k
+                cluster_mask=None
             '''
             member_idx = member_idx.reshape(-1) # z*m
             batch_idx = batch_idx.reshape(-1) # z*m
@@ -597,9 +608,9 @@ class BasicLayer(nn.Module):
         for i_blk in range(len(self.blocks)):
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
-                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = i_blk % 2)
+                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = i_blk % 2, cluster_mask=cluster_mask)
             else:
-                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = i_blk % 2)
+                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = i_blk % 2, cluster_mask=cluster_mask)
 
         '''
         if valid_row_idx is not None:
