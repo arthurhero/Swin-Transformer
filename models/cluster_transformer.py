@@ -386,6 +386,7 @@ class ClusterMerging(nn.Module):
                     mask_[valid_row_idx] = mask_ds
                     mask = mask_
             member_idx = member_idx.reshape(b,-1) # b x k*m_
+            invalid_idx = (member_idx==n).nonzero(as_tuple=True)
             # shrink the point idx
             sort_val, sort_idx = member_idx.sort(dim=-1) # b x k*m_
             sort_right_shift = sort_var.new(sort_val.shape)
@@ -394,8 +395,9 @@ class ClusterMerging(nn.Module):
             new_idx = ((sort_val - sort_right_shift) != 0).long().cumsum(dim=-1) # b x k*m_
             member_idx = member_idx.clone()
             member_idx.scatter_(index=sort_idx, dim=-1, src=new_idx)
-            if valid_row_idx is not None:
+            if len(invalid_idx) > 0:
                 n = member_idx.max() # new row size
+                member_idx[invalid_idx] = n
             else:
                 n = member_idx.max() + 1
 
@@ -410,10 +412,14 @@ class ClusterMerging(nn.Module):
             new_pos = torch.zeros(b,n+1,d, device=pos.device, dtype=pos.dtype)
             new_pos = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,d),dim=1,src=pos, out=new_pos)
             pos = new_pos[:,:n] # b x n' x d
-            if mask is not None:
-                new_mask = torch.zeros(b,n+1,1, device=mask.device, dtype=mask.dtype)
-                new_mask = scatter_mean(index=member_idx.unsqueeze(-1),dim=1,src=mask, out=new_mask)
-                mask = new_mask[:,:n] # b x n' x 1
+            if mask is None:
+                mask = torch.ones(member_idx.shape, device=member_idx.device,dtype=mask.dtype)
+                mask = mask.unsqueeze(-1) # b x k*m_ x 1
+            new_mask = torch.zeros(b,n+1,1, device=mask.device, dtype=mask.dtype)
+            new_mask = scatter_mean(index=member_idx.unsqueeze(-1),dim=1,src=mask, out=new_mask)
+            mask = new_mask[:,:n] # b x n' x 1
+            if mask.min() == 1:
+                mask = None
         else:
             pos = pos_ds
             if mask is not None:
@@ -546,7 +552,8 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
-            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+            #self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+            self.downsample = downsample(dim=dim, num_heads = num_heads, norm_layer=norm_layer)
         else:
             self.downsample = None
 
@@ -635,7 +642,8 @@ class BasicLayer(nn.Module):
         '''
 
         if self.downsample is not None:
-            pos, feat, mask = self.downsample(pos, feat, mask)
+            #pos, feat, mask = self.downsample(pos, feat, mask)
+            pos, feat, mask = self.downsample(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx)
         assert torch.isnan(feat).any()==False, "feat 4 nan"
         assert torch.isinf(feat).any()==False, "feat 4 inf"
         return pos, feat, mask
@@ -733,7 +741,8 @@ class ClusterTransformer(nn.Module):
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, 
-                 downsample=PatchMerging,
+                 #downsample=PatchMerging,
+                 downsample=ClusterMerging,
                  use_checkpoint=False, **kwargs):
         super().__init__()
 

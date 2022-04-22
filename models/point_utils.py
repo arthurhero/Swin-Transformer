@@ -313,9 +313,9 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
     '''
     start1 = time.time()
     #max_cluster_size=25
-    points = points.detach()
+    points = points.detach().clone()
     if pos is not None:
-        pos = pos.detach()
+        pos = pos.detach().clone()
     old_dtype = points.dtype
     points = points.to(torch.float32)
     from pykeops.torch import LazyTensor
@@ -337,9 +337,10 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
 
     if valid_mask is not None:
         valid_mask = valid_mask.detach().long()
-        points *= valid_mask
+        invalid_point_bidx,invalid_point_nidx = (valid_mask.view(b,n)==0).nonzero(as_tuple=True)
+        points[invalid_point_bidx,invalid_point_nidx] = 0
         if pos is not None:
-            pos *= valid_mask # make sure invalid pos and points are all 0
+            pos[invalid_point_bidx,invalid_point_nidx] = 0
 
     # get init means
     if init_feat_means is not None:
@@ -413,6 +414,11 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
 
     if not strictly_balanced:
         inf_bidx, inf_kidx = means[:,:,0].isinf().nonzero(as_tuple=True)
+        # turn invalid points into inf
+        if valid_mask is not None:
+            points[invalid_point_bidx,invalid_point_nidx] = float('inf')
+            if pos is not None:
+                pos[invalid_point_bidx,invalid_point_nidx] = float('inf')
         dist = ((points_ - means_) ** 2).sum(-1) # b x n x k
         if pos is not None:
             dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
@@ -422,6 +428,8 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
         if fillup:
             mutual_choice = torch.zeros(b,n,k,device=points.device)
             mutual_choice.scatter_(index=mean_assignment, dim=2, src=torch.ones(b,n,1,device=points.device))
+            if valid_mask is not None:
+                mutual_choice[invalid_point_bidx,invalid_point_nidx] = 0
             member_grab = dist.argKmin(max_cluster_size,dim=1).permute(0,2,1) # b x msc x k
             mc_tmp = mutual_choice.clone()
             mc_tmp.scatter_(index=member_grab, dim=1, src=torch.ones(b,max_cluster_size,k,device=points.device))
