@@ -388,6 +388,7 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
         if pos is not None:
             dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
             dist += (pos_lambda / d * c) * dist_pos
+            #dist = dist_pos
         mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
 
         # re-compute the means
@@ -416,6 +417,7 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
         if pos is not None:
             dist_pos = ((pos_ - means_pos_) ** 2).sum(-1) # b x n x k
             dist += (pos_lambda / d * c) * dist_pos
+            #dist = dist_pos
         mean_assignment = dist.argKmin(1,dim=2).long() # b x n x 1
         if fillup:
             mutual_choice = torch.zeros(b,n,k,device=points.device)
