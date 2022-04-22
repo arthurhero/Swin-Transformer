@@ -325,10 +325,6 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
     if pos is not None:
         d = pos.shape[2]
         pos = pos.to(points.dtype)
-        # checkerboard
-        check_mask = (((pos[:,:,0]-pos[:,:,1]) % 2)==1).long() # b x n
-        print("check sum",check_mask.sum(),n)
-        pos += check_mask.unsqueeze(2) * (pos.max()+1)
     # normalize mean and std
     if normalize:
         feat_mean = points.mean()
