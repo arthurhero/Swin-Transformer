@@ -168,7 +168,9 @@ class ClusterAttention(nn.Module):
             qkv = qkv.reshape(z,m,3,h,c_).permute(2,0,3,1,4) # 3 x z x h x m x c_
             q, key, v = qkv[0], qkv[1], qkv[2]  # z x h x m x c_
 
-        q = q * self.scale
+        #q = q * self.scale
+        q = q / q.norm(2,dim=-1,keepdim=True)
+        key = key / key.norm(2,dim=-1,keepdim=True)
         attn = (q @ key.transpose(-2, -1)) # z x h x m x m / b x h x n x k
 
         # calculate bias for pos
@@ -182,9 +184,12 @@ class ClusterAttention(nn.Module):
         if mask is not None:
             if not attend_means:
                 mask = mask.reshape(z,1,1,m)
+            '''
             mask = (1-mask)*(-100) # 1->0, 0->-100
             attn = attn + mask
-        attn = self.softmax(attn)
+            '''
+            attn = attn * mask
+        #attn = self.softmax(attn)
 
         attn = self.attn_drop(attn)
 
@@ -575,8 +580,8 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
-            #self.downsample = downsample(dim=dim, norm_layer=norm_layer)
-            self.downsample = downsample(dim=dim, pos_dim=pos_dim, num_heads = num_heads, norm_layer=norm_layer)
+            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+            #self.downsample = downsample(dim=dim, pos_dim=pos_dim, num_heads = num_heads, norm_layer=norm_layer)
         else:
             self.downsample = None
 
@@ -665,8 +670,8 @@ class BasicLayer(nn.Module):
         '''
 
         if self.downsample is not None:
-            #pos, feat, mask = self.downsample(pos, feat, mask)
-            pos, feat, mask = self.downsample(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx)
+            pos, feat, mask = self.downsample(pos, feat, mask)
+            #pos, feat, mask = self.downsample(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx)
         assert torch.isnan(feat).any()==False, "feat 4 nan"
         assert torch.isinf(feat).any()==False, "feat 4 inf"
         return pos, feat, mask
@@ -764,8 +769,8 @@ class ClusterTransformer(nn.Module):
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, 
-                 #downsample=PatchMerging,
-                 downsample=ClusterMerging,
+                 downsample=PatchMerging,
+                 #downsample=ClusterMerging,
                  use_checkpoint=False, **kwargs):
         super().__init__()
 
