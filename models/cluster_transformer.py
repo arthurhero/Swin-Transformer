@@ -297,15 +297,15 @@ class ClusterTransformerBlock(nn.Module):
         return flops
 
 class ClusterMerging(nn.Module):
-    def __init__(self, dim, num_heads, norm_layer=nn.LayerNorm):
+    def __init__(self, dim, pos_dim, num_heads, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
-        self.scale = head_dim ** -0.5
         head_dim = dim // num_heads
+        self.scale = head_dim ** -0.5
         act_layer=nn.GELU
 
-        self.norm = norm_layer(dim)
+        self.norm1 = norm_layer(dim)
         self.qkv = nn.Linear(dim, 3 * dim, bias=True)
         self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=True)
         self.softmax = nn.Softmax(dim=-1)
@@ -345,13 +345,19 @@ class ClusterMerging(nn.Module):
         q, key, v = qkv[0], qkv[1], qkv[2]  # z x h x m x c_
         # downsample q
         # TODO: remove hard coded
-        q = q[:,:,2::5] # get 3 from 16, z x h x m_ x c_
+        start=2
+        skip=5
+        q = q[:,:,start::skip] # get 3 from 16, z x h x m_ x c_
         m_ = q.shape[2]
-        pos_ds = pos[:,2::5]
+        pos_ds = pos[:,start::skip]
         if mask is not None:
-            mask_ds = mask[:,2::5]
+            mask_ds = mask[:,start::skip]
 
         q = q * self.scale
+        '''
+        q = q / q.norm(2,dim=-1,keepdim=True)
+        key = key / key.norm(2,dim=-1,keepdim=True)
+        '''
         attn = (q @ key.transpose(-2, -1)) # z x h x m_ x m 
 
         rel_pos = pos.unsqueeze(1) - pos_ds.unsqueeze(2) # z x m_ x m x d
@@ -362,6 +368,9 @@ class ClusterMerging(nn.Module):
             mask = mask.reshape(z,1,1,m)
             mask = (1-mask)*(-100) # 1->0, 0->-100
             attn = attn + mask
+            '''
+            attn = attn * mask
+            '''
         attn = self.softmax(attn)
 
         feat = (attn @ v).reshape(z,h,-1,c_).permute(0,2,1,3).reshape(z,-1,c) # z x m_ x c
@@ -370,7 +379,7 @@ class ClusterMerging(nn.Module):
         # revert back to row
         if member_idx is not None:
             member_idx = member_idx.reshape(z,m)
-            member_idx = member_idx[:,2::5] # z x m_
+            member_idx = member_idx[:,start::skip] # z x m_
             if valid_row_idx is not None:
                 member_idx_ = member_idx.new(b*k,m_).zero_() + n # elements from blank cluster will go to extra col
                 member_idx_[valid_row_idx] = member_idx
@@ -385,11 +394,15 @@ class ClusterMerging(nn.Module):
                     mask_ = mask.new(b*k,m_,1).zero_()
                     mask_[valid_row_idx] = mask_ds
                     mask = mask_
+            else:
+                pos = pos_ds
+                if mask is not None:
+                    mask = mask_ds
             member_idx = member_idx.reshape(b,-1) # b x k*m_
             invalid_idx = (member_idx==n).nonzero(as_tuple=True)
             # shrink the point idx
             sort_val, sort_idx = member_idx.sort(dim=-1) # b x k*m_
-            sort_right_shift = sort_var.new(sort_val.shape)
+            sort_right_shift = sort_val.new(sort_val.shape)
             sort_right_shift[:,1:] = sort_val[:,:-1].clone()
             sort_right_shift[:,0] = sort_val[:,0].clone()
             new_idx = ((sort_val - sort_right_shift) != 0).long().cumsum(dim=-1) # b x k*m_
@@ -400,6 +413,7 @@ class ClusterMerging(nn.Module):
                 member_idx[invalid_idx] = n
             else:
                 n = member_idx.max() + 1
+            #print("new n",n)
 
             feat = feat.reshape(b,-1,2*c) # b x k*m_ x 2c
             pos = pos.reshape(b,-1,d) # b x k*m_ x d
@@ -411,15 +425,24 @@ class ClusterMerging(nn.Module):
             feat = new_feat[:,:n] # b x n' x 2*c
             new_pos = torch.zeros(b,n+1,d, device=pos.device, dtype=pos.dtype)
             new_pos = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,d),dim=1,src=pos, out=new_pos)
-            pos = new_pos[:,:n] # b x n' x d
+            pos = new_pos[:,:n].contiguous() # b x n' x d
             if mask is None:
-                mask = torch.ones(member_idx.shape, device=member_idx.device,dtype=mask.dtype)
+                mask = torch.ones(member_idx.shape, device=member_idx.device,dtype=torch.long)
                 mask = mask.unsqueeze(-1) # b x k*m_ x 1
             new_mask = torch.zeros(b,n+1,1, device=mask.device, dtype=mask.dtype)
             new_mask = scatter_mean(index=member_idx.unsqueeze(-1),dim=1,src=mask, out=new_mask)
-            mask = new_mask[:,:n] # b x n' x 1
+            mask = new_mask[:,:n].contiguous() # b x n' x 1
+            #print("row min max",mask.sum(1).min(),mask.sum(1).max())
+            row_min = mask.sum(1).min()
+            feat = feat[:,:row_min].contiguous()
+            pos = pos[:,:row_min].contiguous()
+            mask = mask[:,:row_min].contiguous()
+            assert mask.min()==1, 'mask min not 1!'
+            mask = None
+            '''
             if mask.min() == 1:
                 mask = None
+                '''
         else:
             pos = pos_ds
             if mask is not None:
@@ -553,7 +576,7 @@ class BasicLayer(nn.Module):
         # patch merging layer
         if downsample is not None:
             #self.downsample = downsample(dim=dim, norm_layer=norm_layer)
-            self.downsample = downsample(dim=dim, num_heads = num_heads, norm_layer=norm_layer)
+            self.downsample = downsample(dim=dim, pos_dim=pos_dim, num_heads = num_heads, norm_layer=norm_layer)
         else:
             self.downsample = None
 
@@ -578,13 +601,13 @@ class BasicLayer(nn.Module):
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                _, _, member_idx, valid_row_idx= kmeans(feat[:,:,:c//3].contiguous(), self.k, max_cluster_size=max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=False) # b x k x m
+                _, _, member_idx, valid_row_idx= kmeans(feat[:,:,:c//3].contiguous(), self.k, max_cluster_size=max_cluster_size,num_nearest_mean=1, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=True) # b x k x m
             _,k,m = member_idx.shape
             self.k=k
             batch_idx = torch.arange(b,device=feat.device).long().repeat_interleave(k*m) # b*k*m
             member_idx = member_idx.reshape(b*k,m)
             batch_idx = batch_idx.reshape(b*k,m)
-            if len(valid_row_idx)>1:
+            if len(valid_row_idx.shape)>1:
                 cluster_mask = valid_row_idx.reshape(-1,m)
                 valid_row_idx=None
                 z=b*k
