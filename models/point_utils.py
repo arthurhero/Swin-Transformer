@@ -318,6 +318,7 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
         pos = pos.detach().clone()
     old_dtype = points.dtype
     points = points.to(torch.float32)
+    points = torch.randn(points.shape,device=points.device,dtype=torch.float32)
     from pykeops.torch import LazyTensor
     b,n,c = points.shape
     if max_cluster_size is not None:
@@ -369,9 +370,9 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
     elif init=='kmeans++':
         means, means_pos = init_kmeanspp(points, k, pos, pos_lambda, valid_mask) # b x k x c, b x k x d
 
-    means[means.isnan().nonzero(as_tuple=True)]=float('inf')
+    means[means.isnan().nonzero(as_tuple=True)]=float('-inf')
     if pos is not None:
-        means_pos[means_pos.isnan().nonzero(as_tuple=True)]=float('inf')
+        means_pos[means_pos.isnan().nonzero(as_tuple=True)]=float('-inf')
 
     if valid_mask is not None:
         valid_mask = valid_mask.squeeze(2) # b x n
@@ -397,12 +398,12 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
         means.scatter_add_(dim=1, index=mean_assignment.expand(-1,-1,c), src=points) # invalid points will contribute 0
         bin_size = batched_bincount(mean_assignment.squeeze(2), valid_mask, k) # b x k
         means /= bin_size.unsqueeze(2)
-        means[means.isnan().nonzero(as_tuple=True)]=float('inf')
+        means[means.isnan().nonzero(as_tuple=True)]=float('-inf')
         if pos is not None:
             means_pos.zero_()
             means_pos.scatter_add_(dim=1, index=mean_assignment.expand(-1,-1,d), src=pos)
             means_pos /= bin_size.unsqueeze(2)
-            means_pos[means_pos.isnan().nonzero(as_tuple=True)]=float('inf')
+            means_pos[means_pos.isnan().nonzero(as_tuple=True)]=float('-inf')
         if balanced:
             largest_idx=bin_size.argmax(dim=1) # b
             smallest_idx=bin_size.argmin(dim=1) # b
@@ -415,6 +416,8 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
     if not strictly_balanced:
         inf_bidx, inf_kidx = means[:,:,0].isinf().nonzero(as_tuple=True)
         # turn invalid points into inf
+        '''
+        '''
         if valid_mask is not None:
             points[invalid_point_bidx,invalid_point_nidx] = float('inf')
             if pos is not None:

@@ -69,23 +69,13 @@ class ClusterAttention(nn.Module):
 
         self.softmax = nn.Softmax(dim=-1)
 
-        #self.tau = nn.Parameter(torch.Tensor([1.0]))
-
-        # SE
-        '''
-        self.se1 = nn.Linear(head_dim,head_dim)
-        self.se_norm = nn.LayerNorm(head_dim)
-        self.se_act = nn.GELU()
-        self.se2 = nn.Linear(head_dim,head_dim)
-        self.se_sig = nn.Sigmoid()
-        '''
 
     def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
         """
         Args:
-            pos - z x m x d 
-            feat - z x m x c 
-            mask - z x m x 1
+            pos - b x n x d 
+            feat - b x n x c 
+            mask - b x n x 1
         """
         b,n,c=feat.shape
         d = pos.shape[2]
@@ -94,35 +84,7 @@ class ClusterAttention(nn.Module):
 
         h = self.num_heads
         c_ = c // h
-        #qkv = self.qkv(feat).reshape(z,m,h,3,c_).permute(3,0,2,1,4) # 3 x z x h x m x c_
         qkv = self.qkv(feat) # b x n x (3*c)
-
-        # transpose kq
-        '''
-        qkv_ = qkv.reshape(b,n,3,h,c_)
-        q_,k_,v_ = qkv_[:,:,0], qkv_[:,:,1], qkv_[:,:,2]
-        q_ = q_ / q_.norm(2,dim=-1,keepdim=True)
-        k_ = k_ / k_.norm(2,dim=-1,keepdim=True)
-        k_ = k_ / self.tau
-        kq_ = k_.permute(0,2,3,1) @ q_.permute(0,2,1,3) # b x h x c_ x c_
-        kq_ = self.softmax(kq_)
-        v_ = v_.permute(0,2,1,3) @ kq_ # b x h x n x c_
-        v_ = v_.permute(0,2,1,3)
-        qkv__ = qkv_.clone()
-        qkv__[:,:,2] = v_
-        qkv = qkv__.reshape(b,n,-1)
-        '''
-
-        # SE
-        '''
-        qkv_ = qkv.reshape(b,n,3,h,c_)
-        v_ = qkv_[:,:,2] # b x n x h x c_
-        s_ = self.se_sig(self.se2(self.se_act(self.se_norm(self.se1(v_.mean(1,keepdim=True)))))) # b x 1 x h x c_
-        v_ = v_ * s_ 
-        qkv__ = qkv_.clone()
-        qkv__[:,:,2] = v_
-        qkv = qkv__.reshape(b,n,-1)
-        '''
 
         if attend_means:
             qkv = qkv.reshape(b,n,3,c)
@@ -133,7 +95,7 @@ class ClusterAttention(nn.Module):
         pos = pos.to(feat.dtype)
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
         pos_orig = pos.clone()
-
+        
         if member_idx is not None:
             z,m = member_idx.shape
             member_idx = member_idx.reshape(-1) # z*m
@@ -144,13 +106,14 @@ class ClusterAttention(nn.Module):
                 mask = cluster_mask.unsqueeze(-1)
             elif mask is not None:
                 mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
+                if mask.min()==1:
+                    mask = None
         else:
             z,m=b,n
 
         if attend_means:
             q = q.reshape(b,n,h,c_).permute(0,2,1,3) # b x h x n x c_
             qkv = qkv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
-            #qkv = qkv.reshape(z,m,2,h,c_).max(1)[0] # z x 2 x h x c_
             kv = qkv.new(b,k,2,h,c_).zero_()
             rotate_idx = torch.arange(k,device=qkv.device).repeat(int(math.ceil(z/k)))[:z]
             batch_idx = batch_idx.reshape(z,m)[:,0] # z
@@ -168,9 +131,7 @@ class ClusterAttention(nn.Module):
             qkv = qkv.reshape(z,m,3,h,c_).permute(2,0,3,1,4) # 3 x z x h x m x c_
             q, key, v = qkv[0], qkv[1], qkv[2]  # z x h x m x c_
 
-        #q = q * self.scale
-        q = q / q.norm(2,dim=-1,keepdim=True)
-        key = key / key.norm(2,dim=-1,keepdim=True)
+        q = q * self.scale
         attn = (q @ key.transpose(-2, -1)) # z x h x m x m / b x h x n x k
 
         # calculate bias for pos
@@ -184,12 +145,9 @@ class ClusterAttention(nn.Module):
         if mask is not None:
             if not attend_means:
                 mask = mask.reshape(z,1,1,m)
-            '''
             mask = (1-mask)*(-100) # 1->0, 0->-100
             attn = attn + mask
-            '''
-            attn = attn * mask
-        #attn = self.softmax(attn)
+        attn = self.softmax(attn)
 
         attn = self.attn_drop(attn)
 
@@ -249,7 +207,7 @@ class ClusterTransformerBlock(nn.Module):
     def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
         """
         Args:
-            pos - b x n x d, the x,y position of points, k is the total number of clusters in all batches, m is the largest size of any cluster
+            pos - b x n x d, the x,y position of points
             feat - b x n x c, the features of points
         """
 
@@ -264,7 +222,7 @@ class ClusterTransformerBlock(nn.Module):
         # cluster attention 
         feat = self.attn(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=cluster_mask)
 
-        if not attend_means and member_idx is not None:
+        if (not attend_means) and (member_idx is not None):
             z,m=member_idx.shape
             if cluster_mask is not None:
                 member_idx = member_idx * cluster_mask
@@ -278,14 +236,9 @@ class ClusterTransformerBlock(nn.Module):
                 feat = feat_
             member_idx = member_idx.reshape(b,-1) # b x k*m
             feat = feat.reshape(b,-1,c) # b x k*m x c
-            new_feat = torch.zeros(b,n+1,c, device=feat.device, dtype=feat.dtype)
             from torch_scatter import scatter_mean
-            new_feat = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat, out=new_feat)
-            '''
-            from torch_scatter import scatter_max
-            new_feat = scatter_max(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat, out=new_feat)[0]
-            '''
-            feat = new_feat[:,:n] # b x n x c
+            new_feat = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat)
+            feat = new_feat[:,:n].contiguous() # b x n x c
 
         # FFN
         feat = shortcut + self.drop_path(feat)
@@ -318,7 +271,7 @@ class ClusterMerging(nn.Module):
 
         '''
         self.norm2 = norm_layer(dim)
-        mlp_ratio = 1.0
+        mlp_ratio = 2.0
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=0.0)
         '''
@@ -343,6 +296,7 @@ class ClusterMerging(nn.Module):
             pos = pos[batch_idx,member_idx].clone().reshape(z,m,d)
             if mask is not None:
                 mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
+                assert mask.min()==1, 'mask min not 1 in cm!'
         else:
             z,m=b,n
 
@@ -352,17 +306,19 @@ class ClusterMerging(nn.Module):
         # TODO: remove hard coded
         start=2
         skip=5
-        q = q[:,:,start::skip] # get 3 from 16, z x h x m_ x c_
+        q = q[:,:,start::skip].clone() # get 3 from 16, z x h x m_ x c_
         m_ = q.shape[2]
-        pos_ds = pos[:,start::skip]
+        pos_ds = pos[:,start::skip].clone()
         if mask is not None:
-            mask_ds = mask[:,start::skip]
+            mask_ds = mask[:,start::skip].clone()
 
+        '''
         q = q * self.scale
         '''
-        q = q / q.norm(2,dim=-1,keepdim=True)
-        key = key / key.norm(2,dim=-1,keepdim=True)
-        '''
+        q = q / (q.norm(2,dim=-1,keepdim=True)+1e-8)
+        key = key / (key.norm(2,dim=-1,keepdim=True)+1e-8)
+        assert q.isnan().any()==False, 'cm q nan'
+        assert key.isnan().any()==False, 'cm key nan'
         attn = (q @ key.transpose(-2, -1)) # z x h x m_ x m 
 
         rel_pos = pos.unsqueeze(1) - pos_ds.unsqueeze(2) # z x m_ x m x d
@@ -371,12 +327,12 @@ class ClusterMerging(nn.Module):
         attn = attn + pos_bias
         if mask is not None:
             mask = mask.reshape(z,1,1,m)
+            '''
             mask = (1-mask)*(-100) # 1->0, 0->-100
             attn = attn + mask
             '''
             attn = attn * mask
-            '''
-        attn = self.softmax(attn)
+        #attn = self.softmax(attn)
 
         feat = (attn @ v).reshape(z,h,-1,c_).permute(0,2,1,3).reshape(z,-1,c) # z x m_ x c
         feat = self.proj(feat) # z x m_ x 2c
@@ -407,14 +363,15 @@ class ClusterMerging(nn.Module):
             invalid_idx = (member_idx==n).nonzero(as_tuple=True)
             # shrink the point idx
             sort_val, sort_idx = member_idx.sort(dim=-1) # b x k*m_
-            sort_right_shift = sort_val.new(sort_val.shape)
+            sort_right_shift = sort_val.new(sort_val.shape).zero_()
             sort_right_shift[:,1:] = sort_val[:,:-1].clone()
             sort_right_shift[:,0] = sort_val[:,0].clone()
             new_idx = ((sort_val - sort_right_shift) != 0).long().cumsum(dim=-1) # b x k*m_
             member_idx = member_idx.clone()
             member_idx.scatter_(index=sort_idx, dim=-1, src=new_idx)
             if len(invalid_idx) > 0:
-                n = member_idx.max() # new row size
+                member_idx[invalid_idx] = -1
+                n = member_idx.max() + 1 # new row size
                 member_idx[invalid_idx] = n
             else:
                 n = member_idx.max() + 1
@@ -427,17 +384,17 @@ class ClusterMerging(nn.Module):
             from torch_scatter import scatter_mean
             new_feat = torch.zeros(b,n+1,2*c, device=feat.device, dtype=feat.dtype)
             new_feat = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,2*c),dim=1,src=feat, out=new_feat)
-            feat = new_feat[:,:n] # b x n' x 2*c
+            feat = new_feat[:,:n].clone() # b x n' x 2*c
             new_pos = torch.zeros(b,n+1,d, device=pos.device, dtype=pos.dtype)
-            new_pos = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,d),dim=1,src=pos, out=new_pos)
+            new_pos.scatter_(index=member_idx.unsqueeze(-1).expand(-1,-1,d),dim=1,src=pos)
             pos = new_pos[:,:n].contiguous() # b x n' x d
             if mask is None:
                 mask = torch.ones(member_idx.shape, device=member_idx.device,dtype=torch.long)
                 mask = mask.unsqueeze(-1) # b x k*m_ x 1
             new_mask = torch.zeros(b,n+1,1, device=mask.device, dtype=mask.dtype)
-            new_mask = scatter_mean(index=member_idx.unsqueeze(-1),dim=1,src=mask, out=new_mask)
+            new_mask.scatter_(index=member_idx.unsqueeze(-1),dim=1,src=mask)
             mask = new_mask[:,:n].contiguous() # b x n' x 1
-            #print("row min max",mask.sum(1).min(),mask.sum(1).max())
+            '''
             row_min = mask.sum(1).min()
             feat = feat[:,:row_min].contiguous()
             pos = pos[:,:row_min].contiguous()
@@ -447,7 +404,6 @@ class ClusterMerging(nn.Module):
             '''
             if mask.min() == 1:
                 mask = None
-                '''
         else:
             pos = pos_ds
             if mask is not None:
@@ -580,8 +536,8 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
-            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
-            #self.downsample = downsample(dim=dim, pos_dim=pos_dim, num_heads = num_heads, norm_layer=norm_layer)
+            #self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+            self.downsample = downsample(dim=dim, pos_dim=pos_dim, num_heads = num_heads, norm_layer=norm_layer)
         else:
             self.downsample = None
 
@@ -612,7 +568,7 @@ class BasicLayer(nn.Module):
             batch_idx = torch.arange(b,device=feat.device).long().repeat_interleave(k*m) # b*k*m
             member_idx = member_idx.reshape(b*k,m)
             batch_idx = batch_idx.reshape(b*k,m)
-            if len(valid_row_idx.shape)>1:
+            if valid_row_idx is not None and len(valid_row_idx.shape)>1:
                 cluster_mask = valid_row_idx.reshape(-1,m)
                 valid_row_idx=None
                 z=b*k
@@ -624,16 +580,6 @@ class BasicLayer(nn.Module):
             else:
                 z=b*k
                 cluster_mask=None
-            '''
-            member_idx = member_idx.reshape(-1) # z*m
-            batch_idx = batch_idx.reshape(-1) # z*m
-            feat = feat[batch_idx,member_idx].clone().reshape(z,m,c)
-            cluster_pos = pos[batch_idx,member_idx].clone().reshape(z,m,d)
-            if mask is not None:
-                cluster_mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
-            else:
-                cluster_mask = None
-            '''
         else:
             member_idx = None
             batch_idx = None
@@ -641,37 +587,18 @@ class BasicLayer(nn.Module):
             z = b
 
         for i_blk in range(len(self.blocks)):
+            attend_means = i_blk % 2
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
-                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = i_blk % 2, cluster_mask=cluster_mask)
+                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
             else:
-                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = i_blk % 2, cluster_mask=cluster_mask)
-
-        '''
-        if valid_row_idx is not None:
-            member_idx = member_idx.reshape(z,m)
-            member_idx_ = member_idx.new(b*k,m).zero_() + n # elements from blank cluster will go to extra col
-            member_idx_[valid_row_idx] = member_idx
-            member_idx = member_idx_
-            feat_ = feat.new(b*k,m,c).zero_()
-            feat_[valid_row_idx] = feat
-            feat = feat_
-        member_idx = member_idx.reshape(b,-1) # b x k*m
-        feat = feat.reshape(b,-1,c) # b x k*m x c
-        new_feat = torch.zeros(b,n+1,c, device=feat.device, dtype=feat.dtype)
-        from torch_scatter import scatter_mean
-        new_feat = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat, out=new_feat)
-        feat = new_feat[:,:n] # b x n x c
-        '''
-        '''
-        feat_ = feat.new(b,n,c).zero_()
-        feat_[batch_idx,member_idx] = feat.reshape(-1,c)
-        feat = feat_
-        '''
+                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
+            assert torch.isnan(feat).any()==False, "feat nan after blk"
+            assert torch.isinf(feat).any()==False, "feat inf after blk"
 
         if self.downsample is not None:
-            pos, feat, mask = self.downsample(pos, feat, mask)
-            #pos, feat, mask = self.downsample(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx)
+            #pos, feat, mask = self.downsample(pos, feat, mask)
+            pos, feat, mask = self.downsample(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx)
         assert torch.isnan(feat).any()==False, "feat 4 nan"
         assert torch.isinf(feat).any()==False, "feat 4 inf"
         return pos, feat, mask
@@ -769,8 +696,8 @@ class ClusterTransformer(nn.Module):
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, 
-                 downsample=PatchMerging,
-                 #downsample=ClusterMerging,
+                 #downsample=PatchMerging,
+                 downsample=ClusterMerging,
                  use_checkpoint=False, **kwargs):
         super().__init__()
 
@@ -812,7 +739,7 @@ class ClusterTransformer(nn.Module):
             self.layers.append(layer)
 
         self.norm = norm_layer(self.num_features)
-        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        #self.avgpool = nn.AdaptiveAvgPool1d(1)
         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
         self.apply(self._init_weights)
@@ -854,10 +781,16 @@ class ClusterTransformer(nn.Module):
         assert torch.isnan(x).any()==False, "feat after layers nan"
         assert torch.isinf(x).any()==False, "feat after layers inf"
         x = self.norm(x) # b x n x c
-        x = self.avgpool(x.transpose(1, 2))  # b x c x 1
+        #x = self.avgpool(x.transpose(1, 2))  # b x c x 1
+        if mask is not None:
+            from torch_scatter import scatter_mean
+            x = scatter_mean(dim=1,src=x,index=mask.long())
+            x = x[:,1].contiguous()
+        else:
+            x = x.mean(1)
         assert torch.isnan(x).any()==False, "feat after pool nan"
         assert torch.isinf(x).any()==False, "feat after pool inf"
-        x = torch.flatten(x, 1)
+        x = x.reshape(x.shape[0],-1)
         return x, gsms 
 
     def forward(self, x):
