@@ -62,7 +62,8 @@ class ClusterAttention(nn.Module):
         self.scale = qk_scale or head_dim ** -0.5
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=pos_mlp_bias)
+        #self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=pos_mlp_bias)
+        self.pos_mlp = nn.Linear(head_dim+pos_dim, 1, bias=pos_mlp_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -140,7 +141,9 @@ class ClusterAttention(nn.Module):
         else:
             rel_pos = pos[:,None,:,:] - pos_orig[:,:,None,:] # b x n x k x d
         
-        pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # z x h x m x m
+        #pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # z x h x m x m
+        pos_bias = self.pos_mlp(torch.cat([q.unsqueeze(3).expand(-1,-1,-1,rel_pos.shape[2],-1),rel_pos.unsqueeze(1).expand(-1,h,-1,-1,-1)],dim=-1)) # z x h x m x m x 1 / b x h x n x k x 1
+        pos_bias = pos_bias.squeeze(4)
         attn = attn + pos_bias 
         if mask is not None:
             if not attend_means:
