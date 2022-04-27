@@ -52,7 +52,7 @@ class ClusterAttention(nn.Module):
         proj_drop (float, optional): Dropout ratio of output. Default: 0.0
     """
 
-    def __init__(self, dim, num_heads, pos_dim=2, qkv_bias=True, pos_mlp_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, num_heads, pos_dim=2, qkv_bias=True, pos_mlp_bias=True, qk_scale=None, attn_drop=0., proj_drop=0., downsample=False):
 
         super().__init__()
         self.dim = dim
@@ -62,17 +62,22 @@ class ClusterAttention(nn.Module):
         self.scale = qk_scale or head_dim ** -0.5
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        #self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=pos_mlp_bias)
+        self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=pos_mlp_bias)
+        '''
         self.q_pos_mlp = nn.Linear(head_dim, 2, bias=pos_mlp_bias)
         self.pos_mlp = nn.Linear(2+pos_dim, 1, bias=pos_mlp_bias)
+        '''
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
+        if downsample:
+            self.proj = nn.Linear(dim, 2*dim)
+        else:
+            self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
         self.softmax = nn.Softmax(dim=-1)
 
 
-    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
+    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, downsample, cluster_mask=None):
         """
         Args:
             pos - b x n x d 
@@ -91,12 +96,20 @@ class ClusterAttention(nn.Module):
         if attend_means:
             qkv = qkv.reshape(b,n,3,c)
             q = qkv[:,:,0]
+            if downsample:
+                ds_idx = torch.arange(n,device=q.device,dtype=torch.long)
+                ds_idx = ds_idx.reshape(int(n**0.5),int(n**0.5))[::2,::2].reshape(-1).unsqueeze(0).expand(b,-1) # b x n/4
+                q = q.gather(index=ds_idx.unsqueeze(-1).expand(-1,-1,c),dim=1) # b x n/4 x c
+                n_ = n//4
+
             kv = qkv[:,:,1:].reshape(b,n,-1)
             qkv = kv
 
         pos = pos.to(feat.dtype)
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
         pos_orig = pos.clone()
+        if downsample:
+            pos_orig = pos_origpos_orig.gather(index=ds_idx.unsqueeze(-1).expand(-1,-1,d),dim=1)
         
         if member_idx is not None:
             z,m = member_idx.shape
@@ -114,7 +127,7 @@ class ClusterAttention(nn.Module):
             z,m=b,n
 
         if attend_means:
-            q = q.reshape(b,n,h,c_).permute(0,2,1,3) # b x h x n x c_
+            q = q.reshape(b,-1,h,c_).permute(0,2,1,3) # b x h x n x c_
             qkv = qkv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
             kv = qkv.new(b,k,2,h,c_).zero_()
             rotate_idx = torch.arange(k,device=qkv.device).repeat(int(math.ceil(z/k)))[:z]
@@ -142,10 +155,12 @@ class ClusterAttention(nn.Module):
         else:
             rel_pos = pos[:,None,:,:] - pos_orig[:,:,None,:] # b x n x k x d
         
-        #pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # z x h x m x m
+        pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # z x h x m x m
+        '''
         q_pos = self.q_pos_mlp(q) # z x h x m x 2 / b x h x n x 2
         pos_bias = self.pos_mlp(torch.cat([q_pos.unsqueeze(3).expand(-1,-1,-1,rel_pos.shape[2],-1),rel_pos.unsqueeze(1).expand(-1,h,-1,-1,-1)],dim=-1)) # z x h x m x m x 1 / b x h x n x k x 1
         pos_bias = pos_bias.squeeze(4)
+        '''
         attn = attn + pos_bias 
         if mask is not None:
             if not attend_means:
@@ -157,7 +172,7 @@ class ClusterAttention(nn.Module):
         attn = self.attn_drop(attn)
 
         if attend_means:
-            feat = (attn @ v).reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c)
+            feat = (attn @ v).reshape(b,h,-1,c_).permute(0,2,1,3).reshape(b,-1,c)
         else:
             feat = (attn @ v).reshape(z,h,m,c_).permute(0,2,1,3).reshape(z,m,c) # z x m x c
         feat = self.proj(feat)
@@ -192,7 +207,7 @@ class ClusterTransformerBlock(nn.Module):
 
     def __init__(self, dim, num_heads, pos_dim=2,
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, downsample=False):
         super().__init__()
         self.dim = dim
         self.pos_dim = pos_dim
@@ -202,14 +217,17 @@ class ClusterTransformerBlock(nn.Module):
         self.norm1 = norm_layer(dim)
         self.attn = ClusterAttention(
             dim, num_heads=num_heads, pos_dim=pos_dim,
-            qkv_bias=qkv_bias, pos_mlp_bias=pos_mlp_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+            qkv_bias=qkv_bias, pos_mlp_bias=pos_mlp_bias, qk_scale=qk_scale, attn_drop=attn_drop, downsample=downsample, proj_drop=drop)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        if downsample:
+            dim=2*dim
+            mlp_ratio=mlp_ratio//2
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
+    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, downsample, cluster_mask=None):
         """
         Args:
             pos - b x n x d, the x,y position of points
@@ -225,7 +243,9 @@ class ClusterTransformerBlock(nn.Module):
         feat = self.norm1(feat)
 
         # cluster attention 
-        feat = self.attn(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=cluster_mask)
+        feat = self.attn(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, downsample, cluster_mask=cluster_mask)
+        if downsample:
+            feat, ds_idx = feat
 
         if (not attend_means) and (member_idx is not None):
             z,m=member_idx.shape
@@ -246,10 +266,14 @@ class ClusterTransformerBlock(nn.Module):
             feat = new_feat[:,:n].contiguous() # b x n x c
 
         # FFN
-        feat = shortcut + self.drop_path(feat)
+        if not downsample:
+            feat = shortcut + self.drop_path(feat)
         feat = feat + self.drop_path(self.mlp(self.norm2(feat)))
 
-        return feat
+        if downsample:
+            return feat, ds_idx
+        else:
+            return feat
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, num_heads={self.num_heads}, " \
@@ -536,15 +560,18 @@ class BasicLayer(nn.Module):
                                  qkv_bias=qkv_bias, pos_mlp_bias=pos_mlp_bias, qk_scale=qk_scale,
                                  drop=drop, attn_drop=attn_drop,
                                  drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
-                                 norm_layer=norm_layer)
+                                 norm_layer=norm_layer,
+                                 downsample=True if (i==range(depth)-1 and downsample is not None) else False)
             for i in range(depth)])
 
         # patch merging layer
+        '''
         if downsample is not None:
             #self.downsample = downsample(dim=dim, norm_layer=norm_layer)
             self.downsample = downsample(dim=dim, pos_dim=pos_dim, num_heads = num_heads, norm_layer=norm_layer)
         else:
             self.downsample = None
+        '''
 
 
     def forward(self, pos, feat, mask=None):
@@ -594,18 +621,26 @@ class BasicLayer(nn.Module):
         for i_blk in range(len(self.blocks)):
             attend_means = i_blk % 2
             blk = self.blocks[i_blk]
+            downsample = blk.downsample
             if self.use_checkpoint:
-                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
+                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask, downsample=downsample)
             else:
-                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
+                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask, downsample=downsample)
             assert torch.isnan(feat).any()==False, "feat nan after blk"
             assert torch.isinf(feat).any()==False, "feat inf after blk"
+            if downsample:
+                feat, ds_idx = feat
+                pos = pos.gather(index=ds_idx.unsqueeze(-1).expand(-1,-1,d),dim=1)
+                if mask is not None:
+                    mask = mask.gather(index=ds_idx.unsqueeze(-1),dim=1)
 
+        '''
         if self.downsample is not None:
             #pos, feat, mask = self.downsample(pos, feat, mask)
             pos, feat, mask = self.downsample(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx)
         assert torch.isnan(feat).any()==False, "feat 4 nan"
         assert torch.isinf(feat).any()==False, "feat 4 inf"
+        '''
         return pos, feat, mask
 
     def extra_repr(self) -> str:
