@@ -100,7 +100,6 @@ class ClusterAttention(nn.Module):
                 ds_idx = torch.arange(n,device=q.device,dtype=torch.long)
                 ds_idx = ds_idx.reshape(int(n**0.5),int(n**0.5))[::2,::2].reshape(-1).unsqueeze(0).expand(b,-1) # b x n/4
                 q = q.gather(index=ds_idx.unsqueeze(-1).expand(-1,-1,c),dim=1) # b x n/4 x c
-                n_ = n//4
 
             kv = qkv[:,:,1:].reshape(b,n,-1)
             qkv = kv
@@ -109,7 +108,7 @@ class ClusterAttention(nn.Module):
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
         pos_orig = pos.clone()
         if downsample:
-            pos_orig = pos_origpos_orig.gather(index=ds_idx.unsqueeze(-1).expand(-1,-1,d),dim=1)
+            pos_orig = pos_orig.gather(index=ds_idx.unsqueeze(-1).expand(-1,-1,d),dim=1)
         
         if member_idx is not None:
             z,m = member_idx.shape
@@ -177,7 +176,11 @@ class ClusterAttention(nn.Module):
             feat = (attn @ v).reshape(z,h,m,c_).permute(0,2,1,3).reshape(z,m,c) # z x m x c
         feat = self.proj(feat)
         feat = self.proj_drop(feat)
-        return feat
+
+        if downsample:
+            return feat, ds_idx
+        else:
+            return feat
 
     def extra_repr(self) -> str:
         return f'dim={self.dim}, num_heads={self.num_heads}'
@@ -213,6 +216,7 @@ class ClusterTransformerBlock(nn.Module):
         self.pos_dim = pos_dim
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
+        self.downsample=downsample
 
         self.norm1 = norm_layer(dim)
         self.attn = ClusterAttention(
@@ -227,12 +231,13 @@ class ClusterTransformerBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, downsample, cluster_mask=None):
+    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
         """
         Args:
             pos - b x n x d, the x,y position of points
             feat - b x n x c, the features of points
         """
+        downsample=self.downsample
 
         b,n,c = feat.shape
         d = pos.shape[2]
@@ -561,10 +566,15 @@ class BasicLayer(nn.Module):
                                  drop=drop, attn_drop=attn_drop,
                                  drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                                  norm_layer=norm_layer,
-                                 downsample=True if (i==range(depth)-1 and downsample is not None) else False)
+                                 downsample=True if (i==depth-1 and downsample is not None) else False)
             for i in range(depth)])
 
         # patch merging layer
+        if downsample is not None:
+            self.downsample=True
+        else:
+            self.downsample=False
+
         '''
         if downsample is not None:
             #self.downsample = downsample(dim=dim, norm_layer=norm_layer)
@@ -621,18 +631,17 @@ class BasicLayer(nn.Module):
         for i_blk in range(len(self.blocks)):
             attend_means = i_blk % 2
             blk = self.blocks[i_blk]
-            downsample = blk.downsample
             if self.use_checkpoint:
-                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask, downsample=downsample)
+                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
             else:
-                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask, downsample=downsample)
-            assert torch.isnan(feat).any()==False, "feat nan after blk"
-            assert torch.isinf(feat).any()==False, "feat inf after blk"
-            if downsample:
+                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
+            if i_blk==len(self.blocks)-1 and self.downsample:
                 feat, ds_idx = feat
                 pos = pos.gather(index=ds_idx.unsqueeze(-1).expand(-1,-1,d),dim=1)
                 if mask is not None:
                     mask = mask.gather(index=ds_idx.unsqueeze(-1),dim=1)
+            assert torch.isnan(feat).any()==False, "feat nan after blk"
+            assert torch.isinf(feat).any()==False, "feat inf after blk"
 
         '''
         if self.downsample is not None:
