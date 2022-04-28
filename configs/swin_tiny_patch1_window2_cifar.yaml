@@ -4,8 +4,8 @@ MODEL:
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96
-    DEPTHS: [ 2, 2, 6, 2 ]
-    NUM_HEADS: [ 3, 6, 12, 12 ]
+    DEPTHS: [ 2, 2, 8 ]
+    NUM_HEADS: [ 3, 6, 12 ]
     WINDOW_SIZE: 2
     PATCH_SIZE: 1
 DATA:

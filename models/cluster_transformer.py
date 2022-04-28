@@ -630,6 +630,8 @@ class BasicLayer(nn.Module):
 
         for i_blk in range(len(self.blocks)):
             attend_means = i_blk % 2
+            if i_blk == len(self.blocks)-1:
+                attend_means=1
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
                 feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)

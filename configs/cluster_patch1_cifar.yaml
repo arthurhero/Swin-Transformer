@@ -4,7 +4,7 @@ MODEL:
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96
-    DEPTHS: [ 2, 2, 8]
+    DEPTHS: [ 3, 3, 8]
     NUM_HEADS: [ 3, 6, 12 ]
     PATCH_SIZE: 1
   CLUSTER:
