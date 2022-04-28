@@ -331,7 +331,7 @@ class PatchMerging(nn.Module):
         self.dim = dim
         #self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
         self.reduction = nn.Linear(dim, 2 * dim, bias=False)
-        self.norm = norm_layer(dim)
+        self.norm = norm_layer(2* dim)
 
     def forward(self, x, input_resolution):
         """
@@ -353,7 +353,7 @@ class PatchMerging(nn.Module):
         #x = torch.cat([x0, x1, x2, x3], -1)  # B H/2 W/2 4*C
         x = x0 + x1 + x2 + x3  # B H/2 W/2 2C
         #x = x.view(B, -1, 4 * C)  # B H/2*W/2 4*C
-        x = x.view(B, -1, C)  # B H/2*W/2 4*C
+        x = x.view(B, -1, 2*C)  # B H/2*W/2 4*C
 
         x = self.norm(x)
         #x = self.reduction(x)
