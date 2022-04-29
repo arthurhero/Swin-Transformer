@@ -336,9 +336,13 @@ class PatchMerging(nn.Module):
         self.norm = norm_layer(dim)
         self.q_mlp= nn.Linear(dim, dim, bias=True)
         self.kv_mlp= nn.Linear(dim, 2*dim, bias=True)
-        self.pos_mlp= nn.Linear(2, num_heads, bias=True)
+        #self.pos_mlp= nn.Linear(2, num_heads, bias=True)
         self.proj = nn.Linear(dim, 2*dim, bias=True)
         self.softmax = nn.Softmax(dim=-1)
+
+        self.relative_position_bias_table = nn.Parameter(
+            torch.zeros(4, num_heads)) 
+        trunc_normal_(self.relative_position_bias_table, std=.02)
 
     def forward(self, x, input_resolution):
         """
@@ -355,20 +359,23 @@ class PatchMerging(nn.Module):
         x = x.view(B, H, W, C)
         x = self.norm(x) # B H W C
 
-        x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
+        x0 = x[:, 0::2, 0::2, :].reshape(B,-1,C)  # B H/2 W/2 C
 
         q = self.q_mlp(x0).reshape(-1,h,C_).unsqueeze(2) # B*N/4 h 1 C_
 
-        x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
-        x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
-        x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
-        x = torch.cat([x0, x1, x2, x3], -1).reshape(B,-1,4,C)  # B N/4 4 C
+        x1 = x[:, 1::2, 0::2, :].reshape(B,-1,C)  # B H/2 W/2 C
+        x2 = x[:, 0::2, 1::2, :].reshape(B,-1,C)  # B H/2 W/2 C
+        x3 = x[:, 1::2, 1::2, :].reshape(B,-1,C)  # B H/2 W/2 C
+        x = torch.stack([x0, x1, x2, x3], dim=2)  # B N/4 4 C
         kv = self.kv_mlp(x).reshape(B,-1,4,2,h,C_).permute(3,0,1,4,2,5).reshape(2,-1,h,4,C_)
         k,v = kv[0],kv[1] # B*N/4 h 4 C_
         
         attn = q @ k.transpose(-2,-1) # B*N/4 h 1 4
+        '''
         rel_pos = torch.Tensor([[0,0],[1,0],[0,1],[1,1]]).to(x.device).to(x.dtype) # 4 x 2
         pos_bias = self.pos_mlp(rel_pos) # 4 h
+        '''
+        pos_bias = self.relative_position_bias_table # 4 h
         attn = attn + pos_bias.permute(1,0).reshape(1,h,1,4)
         attn = self.softmax(attn)
 
