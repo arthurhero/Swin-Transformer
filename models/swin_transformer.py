@@ -326,12 +326,19 @@ class PatchMerging(nn.Module):
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
 
-    def __init__(self, dim, norm_layer=nn.LayerNorm):
+    def __init__(self, dim, num_heads, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
-        #self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
-        self.reduction = nn.Linear(dim, 2 * dim, bias=False)
-        self.norm = norm_layer(2* dim)
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim ** -0.5
+
+        self.norm = norm_layer(dim)
+        self.q_mlp= nn.Linear(dim, dim, bias=True)
+        self.kv_mlp= nn.Linear(dim, 2*dim, bias=True)
+        self.pos_mlp= nn.Linear(2, num_heads, bias=True)
+        self.proj = nn.Linear(dim, 2*dim, bias=True)
+        self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x, input_resolution):
         """
@@ -342,21 +349,31 @@ class PatchMerging(nn.Module):
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
         assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
+        h = self.num_heads
+        C_ = C//h
 
         x = x.view(B, H, W, C)
-        x = self.reduction(x) # B H W 2C
+        x = self.norm(x) # B H W C
 
-        x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 2C
-        x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 2C
-        x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 2C
-        x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 2C
-        #x = torch.cat([x0, x1, x2, x3], -1)  # B H/2 W/2 4*C
-        x = x0 + x1 + x2 + x3  # B H/2 W/2 2C
-        #x = x.view(B, -1, 4 * C)  # B H/2*W/2 4*C
-        x = x.view(B, -1, 2*C)  # B H/2*W/2 4*C
+        x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
 
-        x = self.norm(x)
-        #x = self.reduction(x)
+        q = self.q_mlp(x0).reshape(-1,h,C_).unsqueeze(2) # B*N/4 h 1 C_
+
+        x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
+        x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
+        x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
+        x = torch.cat([x0, x1, x2, x3], -1).reshape(B,-1,4,C)  # B N/4 4 C
+        kv = self.kv_mlp(x).reshape(B,-1,4,2,h,C_).permute(3,0,1,4,2,5).reshape(2,-1,h,4,C_)
+        k,v = kv[0],kv[1] # B*N/4 h 4 C_
+        
+        attn = q @ k.transpose(-2,-1) # B*N/4 h 1 4
+        rel_pos = torch.Tensor([[0,0],[1,0],[0,1],[1,1]], device=x.device, dtype=x.dtype) # 4 x 2
+        pos_bias = self.pos_mlp(rel_pos) # 4 h
+        attn = attn + pos_bias.permute(1,0).reshape(1,h,1,4)
+        attn = self.softmax(attn)
+
+        x = (attn @ v).reshape(B,-1,C)
+        x = self.proj(x) # B N/4 2C
 
         return x
 
@@ -416,7 +433,7 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
-            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+            self.downsample = downsample(dim=dim, num_heads=num_heads, norm_layer=norm_layer)
         else:
             self.downsample = None
 

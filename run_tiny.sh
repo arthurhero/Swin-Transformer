@@ -7,7 +7,7 @@ CONFIG_FILE=configs/swin_tiny_patch1_window2_cifar.yaml
 #DATA_PATH=../datasets/imagenet/
 DATA_PATH=../datasets/cifar10/
 
-CUDA_VISIBLE_DEVICES=1,2,3,4 WORLD_SIZE=$NUM_PROC python -m torch.distributed.launch --nproc_per_node $NUM_PROC --master_port 12345 \
+CUDA_VISIBLE_DEVICES=0,5,6,7 WORLD_SIZE=$NUM_PROC python -m torch.distributed.launch --nproc_per_node $NUM_PROC --master_port 12344 \
     main.py --cfg $CONFIG_FILE \
     --data-path $DATA_PATH \
     --batch-size 1024 \
