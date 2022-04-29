@@ -367,7 +367,7 @@ class PatchMerging(nn.Module):
         k,v = kv[0],kv[1] # B*N/4 h 4 C_
         
         attn = q @ k.transpose(-2,-1) # B*N/4 h 1 4
-        rel_pos = torch.Tensor([[0,0],[1,0],[0,1],[1,1]], device=x.device, dtype=x.dtype) # 4 x 2
+        rel_pos = torch.Tensor([[0,0],[1,0],[0,1],[1,1]]).to(x.device).to(x.dtype) # 4 x 2
         pos_bias = self.pos_mlp(rel_pos) # 4 h
         attn = attn + pos_bias.permute(1,0).reshape(1,h,1,4)
         attn = self.softmax(attn)
