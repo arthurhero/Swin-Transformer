@@ -357,7 +357,7 @@ class PatchMerging(nn.Module):
         C_ = C//h
 
         x = self.norm(x) # B C
-        x = x.view(B, H//2,2, W//2,2 C).permute(0,1,3,2,4,5).reshape(-1,4,C)
+        x = x.view(B, H//2,2, W//2,2, C).permute(0,1,3,2,4,5).reshape(-1,4,C)
 
         x0 = x[:,0].clone()
 
