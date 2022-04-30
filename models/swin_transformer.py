@@ -356,20 +356,16 @@ class PatchMerging(nn.Module):
         h = self.num_heads
         C_ = C//h
 
-        x = x.view(B, H, W, C)
-        x = self.norm(x) # B H W C
+        x = self.norm(x) # B C
+        x = x.view(B, H//2,2, W//2,2 C).permute(0,1,3,2,4,5).reshape(-1,4,C)
 
-        x0 = x[:, 0::2, 0::2, :].clone().reshape(B,-1,C)  # B H/2 W/2 C
+        x0 = x[:,0].clone()
 
         q = self.q_mlp(x0).reshape(-1,h,C_).unsqueeze(2) # B*N/4 h 1 C_
         q = q * self.scale
         #q = q / (q.norm(2,dim=-1,keepdim=True)+1e-8)
 
-        x1 = x[:, 1::2, 0::2, :].clone().reshape(B,-1,C)  # B H/2 W/2 C
-        x2 = x[:, 0::2, 1::2, :].clone().reshape(B,-1,C)  # B H/2 W/2 C
-        x3 = x[:, 1::2, 1::2, :].clone().reshape(B,-1,C)  # B H/2 W/2 C
-        x = torch.stack([x0, x1, x2, x3], dim=2)  # B N/4 4 C
-        kv = self.kv_mlp(x).reshape(B,-1,4,2,h,C_).permute(3,0,1,4,2,5).reshape(2,-1,h,4,C_)
+        kv = self.kv_mlp(x).reshape(-1,4,2,h,C_).permute(2,0,3,1,4)
         k,v = kv[0],kv[1] # B*N/4 h 4 C_
         #k = k / (k.norm(2,dim=-1,keepdim=True)+1e-8)
         
