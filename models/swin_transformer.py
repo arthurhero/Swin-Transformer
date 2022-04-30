@@ -362,12 +362,12 @@ class PatchMerging(nn.Module):
         x0 = x[:,0].clone()
 
         q = self.q_mlp(x0).reshape(-1,h,C_).unsqueeze(2) # B*N/4 h 1 C_
-        q = q * self.scale
-        #q = q / (q.norm(2,dim=-1,keepdim=True)+1e-8)
+        #q = q * self.scale
+        q = q / (q.norm(2,dim=-1,keepdim=True)+1e-8)
 
         kv = self.kv_mlp(x).reshape(-1,4,2,h,C_).permute(2,0,3,1,4)
         k,v = kv[0],kv[1] # B*N/4 h 4 C_
-        #k = k / (k.norm(2,dim=-1,keepdim=True)+1e-8)
+        k = k / (k.norm(2,dim=-1,keepdim=True)+1e-8)
         
         attn = q @ k.transpose(-2,-1) # B*N/4 h 1 4
         '''
@@ -376,7 +376,7 @@ class PatchMerging(nn.Module):
         '''
         pos_bias = self.relative_position_bias_table # 4 h
         attn = attn + pos_bias.permute(1,0).reshape(1,h,1,4)
-        attn = self.softmax(attn)
+        #attn = self.softmax(attn)
 
         x = (attn @ v).reshape(B,-1,C)
         x = self.proj(x) # B N/4 2C
