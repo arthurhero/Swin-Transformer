@@ -189,7 +189,7 @@ class ClusterTransformerBlock(nn.Module):
 
     def __init__(self, dim, num_heads, pos_dim=2,
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, last=False):
         super().__init__()
         self.dim = dim
         self.pos_dim = pos_dim
@@ -206,10 +206,12 @@ class ClusterTransformerBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-        self.act = act_layer()
-        self.pos_offset_mlp = nn.Linear(dim, pos_dim)
-        self.pos_offset_mlp.weight.data.fill_(0.0)
-        self.pos_offset_mlp.bias.data.fill_(0.0)
+        self.last = last
+        if not last:
+            self.act = act_layer()
+            self.pos_offset_mlp = nn.Linear(dim, pos_dim)
+            self.pos_offset_mlp.weight.data.fill_(0.0)
+            self.pos_offset_mlp.bias.data.fill_(0.0)
 
     def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
         """
@@ -251,8 +253,9 @@ class ClusterTransformerBlock(nn.Module):
         feat = shortcut + self.drop_path(feat)
         feat = feat + self.drop_path(self.mlp(self.norm2(feat)))
 
-        offset = self.pos_offset_mlp(self.act(feat)) # b x n x d
-        pos = pos + offset
+        if not self.last:
+            offset = self.pos_offset_mlp(self.act(feat)) # b x n x d
+            pos = pos + offset
 
         return feat, pos
 
@@ -546,7 +549,8 @@ class BasicLayer(nn.Module):
                                  qkv_bias=qkv_bias, pos_mlp_bias=pos_mlp_bias, qk_scale=qk_scale,
                                  drop=drop, attn_drop=attn_drop,
                                  drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
-                                 norm_layer=norm_layer)
+                                 norm_layer=norm_layer,
+                                 last=True if i==depth-1 and downsample is None else False)
             for i in range(depth)])
 
         # patch merging layer
@@ -675,7 +679,6 @@ class PatchEmbed(nn.Module):
         pos = pos.view(b,-1,2) #  b x n x 2
 
         # normalize
-        pos = pos.to(feat.dtype)
         pos_mean = pos.mean()
         pos_std = (pos.view(-1).var(dim=0, unbiased=False)+1e-5).pow(0.5)
         pos = (pos-pos_mean) / pos_std
