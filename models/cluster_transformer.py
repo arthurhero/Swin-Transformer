@@ -605,8 +605,11 @@ class PatchEmbed(nn.Module):
         self.in_chans = in_chans
         self.embed_dim = embed_dim
 
-        #self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=3, stride=1, padding=1)
+        self.proj1 = nn.Conv2d(in_chans, embed_dim//2, kernel_size=7, stride=2, padding=3)
+        self.act1 = nn.GELU()
+        self.proj2 = nn.Conv2d(embed_dim//2, embed_dim, kernel_size=3, stride=2, padding=1)
+
+        self.act2 = nn.GELU()
         if norm_layer is not None:
             self.norm = norm_layer(embed_dim)
         else:
@@ -615,7 +618,8 @@ class PatchEmbed(nn.Module):
     def forward(self, x):
         b,c,h,w = x.shape
 
-        x = self.proj(x).flatten(2).transpose(1, 2)  # b x n x c
+        x = self.proj2(self.act1(self.proj1(x)))
+        x = x.flatten(2).transpose(1, 2)  # b x n x c
         assert torch.isnan(self.proj.weight).any()==False, "weight nan"
         assert torch.isinf(self.proj.weight).any()==False, "weight inf"
         assert torch.isnan(self.proj.bias).any()==False, "bias nan"

@@ -1,0 +1,20 @@
+MODEL:
+  TYPE: cluster
+  NAME: cluster_imagenet_tmp
+  DROP_PATH_RATE: 0.2
+  SWIN:
+    EMBED_DIM: 96
+    DEPTHS: [ 2, 2, 6, 2]
+    NUM_HEADS: [ 3, 6, 12, 24 ]
+    PATCH_SIZE: 1 # does not matter, see PatchEmbed in code
+  CLUSTER:
+    POS_DIM: 2
+    CLUSTER_SIZE: 16 # currently hard coded as 12, max 16 for fillup
+    MAX_CLUSTER_SIZE: 0
+    POS_LAMBDA: [10.0,3.0,1.0,0.0]
+DATA:
+  DATASET: imagenet 
+  IMG_SIZE: 224
+  BATCH_SIZE: 16 # total batch size on all gpus, must be divisible by num of gpus
+TRAIN:
+  EPOCHS: 300
