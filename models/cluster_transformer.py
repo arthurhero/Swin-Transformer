@@ -67,6 +67,8 @@ class ClusterAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
+        self.pos_offset_mlp = nn.Linear(dim, pos_dim)
+
         self.softmax = nn.Softmax(dim=-1)
 
 
@@ -92,8 +94,10 @@ class ClusterAttention(nn.Module):
             kv = qkv[:,:,1:].reshape(b,n,-1)
             qkv = kv
 
+        '''
         pos = pos.to(feat.dtype)
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
+        '''
         pos_orig = pos.clone()
         
         if member_idx is not None:
@@ -155,9 +159,10 @@ class ClusterAttention(nn.Module):
             feat = (attn @ v).reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c)
         else:
             feat = (attn @ v).reshape(z,h,m,c_).permute(0,2,1,3).reshape(z,m,c) # z x m x c
+        pos_offset = self.pos_offset_mlp(feat) # z x m x d
         feat = self.proj(feat)
         feat = self.proj_drop(feat)
-        return feat
+        return feat, offset
 
     def extra_repr(self) -> str:
         return f'dim={self.dim}, num_heads={self.num_heads}'
@@ -220,7 +225,7 @@ class ClusterTransformerBlock(nn.Module):
         feat = self.norm1(feat)
 
         # cluster attention 
-        feat = self.attn(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=cluster_mask)
+        feat, offset = self.attn(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=cluster_mask)
 
         if (not attend_means) and (member_idx is not None):
             z,m=member_idx.shape
@@ -234,17 +239,25 @@ class ClusterTransformerBlock(nn.Module):
                 feat_ = feat.new(b*k,m,c).zero_()
                 feat_[valid_row_idx] = feat
                 feat = feat_
+                offset_ = offset.new(b*k,m,d).zero_()
+                offset_[valid_row_idx] = offset
+                offset = offset_
             member_idx = member_idx.reshape(b,-1) # b x k*m
             feat = feat.reshape(b,-1,c) # b x k*m x c
+            offset = offset.reshape(b,-1,d) # b x k*m x d
             from torch_scatter import scatter_mean
             new_feat = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,c),dim=1,src=feat)
+            new_offset = scatter_mean(index=member_idx.unsqueeze(-1).expand(-1,-1,d),dim=1,src=offset)
             feat = new_feat[:,:n].contiguous() # b x n x c
+            offset = new_offset[:,:n].contiguous() # b x n x d
 
         # FFN
         feat = shortcut + self.drop_path(feat)
         feat = feat + self.drop_path(self.mlp(self.norm2(feat)))
 
-        return feat
+        pos = pos + offset
+
+        return feat, pos
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, num_heads={self.num_heads}, " \
@@ -284,9 +297,10 @@ class ClusterMerging(nn.Module):
         h = self.num_heads
         c_ = c // h
         qkv = self.qkv(feat) # b x n x (3*c)
+        '''
         pos = pos.to(feat.dtype)
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
-        pos_orig = pos.clone()
+        '''
 
         if member_idx is not None:
             z,m = member_idx.shape
@@ -408,6 +422,10 @@ class ClusterMerging(nn.Module):
             pos = pos_ds
             if mask is not None:
                 mask = mask_ds
+
+        pos_mean = pos.mean()
+        pos_std = (pos.view(-1).var(dim=0, unbiased=False)+1e-5).pow(0.5)
+        pos = (pos-pos_mean) / pos_std
 
         return pos, feat, mask
 
@@ -590,9 +608,9 @@ class BasicLayer(nn.Module):
             attend_means = i_blk % 2
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
-                feat = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
+                feat, pos = checkpoint.checkpoint(pos, feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
             else:
-                feat = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
+                feat, pos = blk(pos, feat, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
             assert torch.isnan(feat).any()==False, "feat nan after blk"
             assert torch.isinf(feat).any()==False, "feat inf after blk"
 
@@ -658,6 +676,11 @@ class PatchEmbed(nn.Module):
         pos[:,:,:,0]=xs
         pos[:,:,:,1]=ys
         pos = pos.view(b,-1,2) #  b x n x 2
+
+        pos = pos.to(feat.dtype)
+        pos_mean = pos.mean()
+        pos_std = (pos.view(-1).var(dim=0, unbiased=False)+1e-5).pow(0.5)
+        pos = (pos-pos_mean) / pos_std
 
         return pos, x, None
 
