@@ -15,6 +15,6 @@ MODEL:
 DATA:
   DATASET: imagenet 
   IMG_SIZE: 224
-  BATCH_SIZE: 16 # total batch size on all gpus, must be divisible by num of gpus
+  BATCH_SIZE: 1024 # total batch size on all gpus, must be divisible by num of gpus
 TRAIN:
   EPOCHS: 300

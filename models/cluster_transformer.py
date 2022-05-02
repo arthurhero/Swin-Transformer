@@ -503,10 +503,10 @@ class BasicLayer(nn.Module):
         c = feat.shape[2]
         c_ = c // h
         assert self.cluster_size > 0, 'self.cluster_size must be positive'
-        self.cluster_size=12
+        self.cluster_size=24
         self.k = int(math.ceil(n / float(self.cluster_size)))
         k = self.k
-        max_cluster_size = 16
+        max_cluster_size = 32
         if self.k>1:
             # perform k-means
             with torch.no_grad():
@@ -616,14 +616,10 @@ class PatchEmbed(nn.Module):
             self.norm = None
 
     def forward(self, x):
-        b,c,h,w = x.shape
 
         x = self.proj2(self.act1(self.proj1(x)))
+        b,c,h,w = x.shape
         x = x.flatten(2).transpose(1, 2)  # b x n x c
-        assert torch.isnan(self.proj.weight).any()==False, "weight nan"
-        assert torch.isinf(self.proj.weight).any()==False, "weight inf"
-        assert torch.isnan(self.proj.bias).any()==False, "bias nan"
-        assert torch.isinf(self.proj.bias).any()==False, "bias inf"
         if self.norm is not None:
             x = self.norm(x)
         assert torch.isnan(x).any()==False, "feat 000 nan"
