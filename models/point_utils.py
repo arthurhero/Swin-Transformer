@@ -318,7 +318,7 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
         pos = pos.detach().clone()
     old_dtype = points.dtype
     points = points.to(torch.float32)
-    points = torch.randn(points.shape,device=points.device,dtype=torch.float32)
+    #points = torch.randn(points.shape,device=points.device,dtype=torch.float32)
     from pykeops.torch import LazyTensor
     b,n,c = points.shape
     if max_cluster_size is not None:
