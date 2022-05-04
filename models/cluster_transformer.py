@@ -144,7 +144,7 @@ class ClusterAttention(nn.Module):
             rel_cluster_feat = cluster_feat.unsqueeze(1) - cluster_feat.unsqueeze(2) # z x m x m x c_
             cluster_dist = (rel_cluster_feat**2).sum(-1) # z x m x m
             cluster_dist = cluster_dist.unsqueeze(1) # z x 1 x m x m
-            attn = attn - cluster_scale
+            attn = attn - cluster_dist
         else:
             rel_pos = pos[:,None,:,:] - pos_orig[:,:,None,:] # b x n x k x d
         
