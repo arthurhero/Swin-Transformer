@@ -284,7 +284,7 @@ class ClusterMerging(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=0.0)
         '''
 
-    def forward(self, pos, feat, mask, member_idx, batch_idx, k, valid_row_idx):
+    def forward(self, pos, feat, cluster_feat, mask, member_idx, batch_idx, k, valid_row_idx):
         b,n,c = feat.shape
         d = pos.shape[2]
         feat = self.norm1(feat)
@@ -303,6 +303,7 @@ class ClusterMerging(nn.Module):
             batch_idx = batch_idx.reshape(-1) # z*m
             qkv = qkv[batch_idx,member_idx].clone().reshape(z,m,-1)
             pos = pos[batch_idx,member_idx].clone().reshape(z,m,d)
+            cluster_feat = cluster_feat[batch_idx,member_idx].clone().reshape(z,m,c_)
             if mask is not None:
                 mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
                 assert mask.min()==1, 'mask min not 1 in cm!'
@@ -318,6 +319,7 @@ class ClusterMerging(nn.Module):
         q = q[:,:,start::skip].clone() # get 3 from 16, z x h x m_ x c_
         m_ = q.shape[2]
         pos_ds = pos[:,start::skip].clone()
+        cluster_feat_ds = cluster_feat[:,start::skip].clone()
         if mask is not None:
             mask_ds = mask[:,start::skip].clone()
 
@@ -331,6 +333,11 @@ class ClusterMerging(nn.Module):
         attn = (q @ key.transpose(-2, -1)) # z x h x m_ x m 
 
         rel_pos = pos.unsqueeze(1) - pos_ds.unsqueeze(2) # z x m_ x m x d
+
+        rel_cluster_feat = cluster_feat.unsqueeze(1) - cluster_feat_ds.unsqueeze(2) # z x m_ x m x c_
+        cluster_dist = (rel_cluster_feat**2).sum(-1) # z x m_ x m
+        cluster_dist = cluster_dist.unsqueeze(1) # z x 1 x m_ x m
+        attn = attn - cluster_dist
 
         pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # z x h x m_ x m
         attn = attn + pos_bias
