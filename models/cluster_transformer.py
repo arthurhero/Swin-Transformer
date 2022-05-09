@@ -272,10 +272,10 @@ class ClusterMerging(nn.Module):
         act_layer=nn.GELU
 
         self.norm1 = norm_layer(dim)
-        self.qkv = nn.Linear(dim, 3 * dim, bias=True)
+        self.qkv = nn.Linear(dim, 4 * dim, bias=True)
         self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=True)
         self.softmax = nn.Softmax(dim=-1)
-        self.proj = nn.Linear(dim, 2*dim)
+        #self.proj = nn.Linear(2*dim, 2*dim)
 
         '''
         self.norm2 = norm_layer(dim)
@@ -291,7 +291,7 @@ class ClusterMerging(nn.Module):
 
         h = self.num_heads
         c_ = c // h
-        qkv = self.qkv(feat) # b x n x (3*c)
+        qkv = self.qkv(feat) # b x n x (4*c)
         '''
         pos = pos.to(feat.dtype)
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
@@ -309,8 +309,9 @@ class ClusterMerging(nn.Module):
         else:
             z,m=b,n
 
-        qkv = qkv.reshape(z,m,3,h,c_).permute(2,0,3,1,4) # 3 x z x h x m x c_
-        q, key, v = qkv[0], qkv[1], qkv[2]  # z x h x m x c_
+        qkv = qkv.reshape(z,m,4,h,c_).permute(2,0,3,1,4) # 4 x z x h x m x c_
+        q, key, v = qkv[0], qkv[1], qkv[2:]  # z x h x m x c_
+        v = v.permute(1,2,3,0,4).reshape(z,h,m,-1) # z x h x m x 2c_
         # downsample q
         # TODO: remove hard coded
         start=2
@@ -344,8 +345,8 @@ class ClusterMerging(nn.Module):
             attn = attn * mask
         #attn = self.softmax(attn)
 
-        feat = (attn @ v).reshape(z,h,-1,c_).permute(0,2,1,3).reshape(z,-1,c) # z x m_ x c
-        feat = self.proj(feat) # z x m_ x 2c
+        feat = (attn @ v).reshape(z,h,-1,2*c_).permute(0,2,1,3).reshape(z,-1,2*c) # z x m_ x 2c
+        #feat = self.proj(feat) # z x m_ x 2c
 
         # revert back to row
         if member_idx is not None:
