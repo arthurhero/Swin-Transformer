@@ -70,7 +70,7 @@ class ClusterAttention(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
 
 
-    def forward(self, pos, feat, cluster_feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
+    def forward(self, pos, feat, cluster_feat, cluster_score, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
         """
         Args:
             pos - b x n x d 
@@ -117,7 +117,9 @@ class ClusterAttention(nn.Module):
 
         if attend_means:
             q = q.reshape(b,n,h,c_).permute(0,2,1,3) # b x h x n x c_
-            qkv = qkv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
+            #qkv = qkv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
+            qkv = (qkv.reshape(z,m,2,h,c_) * cluster_score.reshape(z,m,1,1,1)).sum(1) # z x 2 x h x c_
+
             kv = qkv.new(b,k,2,h,c_).zero_()
             rotate_idx = torch.arange(k,device=qkv.device).repeat(int(math.ceil(z/k)))[:z]
             batch_idx = batch_idx.reshape(z,m)[:,0] # z
@@ -212,7 +214,7 @@ class ClusterTransformerBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, pos, feat, cluster_feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
+    def forward(self, pos, feat, cluster_feat, cluster_score, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
         """
         Args:
             pos - b x n x d, the x,y position of points
@@ -228,7 +230,7 @@ class ClusterTransformerBlock(nn.Module):
         feat = self.norm1(feat)
 
         # cluster attention 
-        feat = self.attn(pos, feat, cluster_feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=cluster_mask)
+        feat = self.attn(pos, feat, cluster_feat, cluster_score, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=cluster_mask)
 
         if (not attend_means) and (member_idx is not None):
             z,m=member_idx.shape
@@ -597,19 +599,23 @@ class BasicLayer(nn.Module):
             else:
                 z=b*k
                 cluster_mask=None
+            cluster_feat_ = cluster_feat[batch_idx,member_idx].clone().reshape(z,m,-1)
+            cluster_mean = cluster_feat_.mean(1,keepdim=True) # z x 1 x c_
+            cluster_score = F.softmax(((cluster_feat_-cluster_mean)**2).sum(-1),dim=-1) # z x m
         else:
             member_idx = None
             batch_idx = None
             valid_row_idx = None
             z = b
+            cluster_score = None
 
         for i_blk in range(len(self.blocks)):
             attend_means = i_blk % 2
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
-                feat, pos = checkpoint.checkpoint(pos, feat, cluster_feat, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
+                feat, pos = checkpoint.checkpoint(pos, feat, cluster_feat, cluster_score, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
             else:
-                feat, pos = blk(pos, feat, cluster_feat, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
+                feat, pos = blk(pos, feat, cluster_feat, cluster_score, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
             assert torch.isnan(feat).any()==False, "feat nan after blk"
             assert torch.isinf(feat).any()==False, "feat inf after blk"
 
