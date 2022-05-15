@@ -77,6 +77,7 @@ class ClusterAttention(nn.Module):
             feat - b x n x c 
             mask - b x n x 1
         """
+        cluster_size = 16
         b,n,c=feat.shape
         d = pos.shape[2]
         assert c == self.dim, "dim does not accord to input"
@@ -86,12 +87,11 @@ class ClusterAttention(nn.Module):
         c_ = c // h
         qkv = self.qkv(feat) # b x n x (3*c)
 
-        if attend_means:
-            qkv = qkv.reshape(b,n,3,c)
-            q = qkv[:,:,0]
-            kv = qkv[:,:,1:].reshape(b,n,-1)
-            qkv = kv
-            pos_orig = pos.clone()
+        qkv = qkv.reshape(b,n,3,c)
+        q = qkv[:,:,0]
+        kv = qkv[:,:,1:].reshape(b,n,-1)
+        pos_orig = pos.clone()
+        cluster_feat_orig = cluster_feat.clone()
 
         '''
         pos = pos.to(feat.dtype)
@@ -100,32 +100,56 @@ class ClusterAttention(nn.Module):
         
         if member_idx is not None:
             z,m = member_idx.shape
+
+            if not attend_means:
+                # collect closest 2 clusters for each point
+                batch_idx2 = torch.arange(b,device=mean_assigment.device,dtype=mean_assigment.dtype).reshape(-1,1,1).expand(-1,n,mean_assigment.shape[-1]) # b x n x 2
+                member_idx = member_idx.reshape(b,k,m)[batch_idx2.view(-1),mean_assigment.view(-1)].reshape(b,n,2*m) # b x n x 2m
+                if cluster_mask is not None:
+                    cluster_mask = cluster_mask.reshape(b,k,m)[batch_idx2.view(-1),mean_assigment.view(-1)].reshape(b,n,2*m) # b x n x 2m
+                # sample a subset of neighbors
+                neighbor_idx = torch.topk(torch.rand(b*n, 2*m, device=member_idx.device), cluster_size, dim=-1, largest=True, sorted=False)[1] # b*n x m
+                member_idx = member_idx.gather(index=neighbor_idx.reshape(b,n,-1),dim=-1) # b x n x m
+                if cluster_mask is not None:
+                    cluster_mask = cluster_mask.gather(index=neighbor_idx.reshape(b,n,-1),dim=-1) # b x n x m
+                batch_idx = torch.arange(b,device=mean_assigment.device,dtype=mean_assigment.dtype).reshape(-1,1,1).expand(-1,n,cluster_size) # b x n x m
+                m = cluster_size
+                z = b*n
+
             member_idx = member_idx.reshape(-1) # z*m
             batch_idx = batch_idx.reshape(-1) # z*m
-            qkv = qkv[batch_idx,member_idx].clone().reshape(z,m,-1)
+            kv = kv[batch_idx,member_idx].clone().reshape(z,m,-1)
             pos = pos[batch_idx,member_idx].clone().reshape(z,m,d)
             if not attend_means:
                 cluster_feat = cluster_feat[batch_idx,member_idx].clone().reshape(z,m,c_)
             if cluster_mask is not None:
-                mask = cluster_mask.unsqueeze(-1)
+                mask = cluster_mask.reshape(z,m,1)
             elif mask is not None:
                 mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
                 if mask.min()==1:
                     mask = None
         else:
             z,m=b,n
+            if not attend_means:
+                z = b*n
+                m = cluster_size
 
         if attend_means:
             q = q.reshape(b,n,h,c_).permute(0,2,1,3) # b x h x n x c_
             #qkv = qkv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
-            qkv = (qkv.reshape(z,m,2,h,c_) * cluster_score.reshape(z,m,1,1,1)).sum(1) # z x 2 x h x c_
-
-            kv = qkv.new(b,k,2,h,c_).zero_()
-            rotate_idx = torch.arange(k,device=qkv.device).repeat(int(math.ceil(z/k)))[:z]
-            batch_idx = batch_idx.reshape(z,m)[:,0] # z
-            kv[batch_idx, rotate_idx] = qkv # b x k x 2 x h x c_
-            kv = kv.permute(2,0,3,1,4) # 2 x b x h x k x c_
-            mask = (kv!=0).long()[0,:,:,None,:,0] # b x h x 1 x k
+            if mask is not None:
+                cluster_score = cluster_score.unsqueeze(-1) * mask
+            kv_ = (kv.reshape(z,m,2,h,c_) * cluster_score.reshape(z,m,1,1,1)).sum(1) # z x 2 x h x c_
+            if z == b*k:
+                kv = kv_.reshape(b,k,2,h,c_)
+                mask = None
+            else:
+                kv = kv_.new(b,k,2,h,c_).zero_()
+                rotate_idx = torch.arange(k,device=kv_.device).repeat(int(math.ceil(z/k)))[:z]
+                batch_idx = batch_idx.reshape(z,m)[:,0] # z
+                kv[batch_idx, rotate_idx] = kv_ # b x k x 2 x h x c_
+                kv = kv.permute(2,0,3,1,4) # 2 x b x h x k x c_
+                mask = (kv!=0).long()[0,:,:,None,:,0] # b x h x 1 x k
             key,v = kv[0],kv[1] # b x h x k x c_
 
             pos = pos.mean(1) # z x d
@@ -134,27 +158,32 @@ class ClusterAttention(nn.Module):
             pos = pos_
 
         else:
+            '''
             qkv = qkv.reshape(z,m,3,h,c_).permute(2,0,3,1,4) # 3 x z x h x m x c_
             q, key, v = qkv[0], qkv[1], qkv[2]  # z x h x m x c_
+            '''
+            kv = kv.reshape(b,n,m,2,h,c_).permute(3,0,4,1,2,5) # 2 x b x h x n x m x c_
+            key, v = qkv[0], qkv[1]  # b x h x n x m x c_
+            q = q.reshape(b,n,1,h,c_).permute(0,3,1,2,4)
 
         q = q * self.scale
-        attn = (q @ key.transpose(-2, -1)) # z x h x m x m / b x h x n x k
-
-        # calculate bias for pos
-        if not attend_means:
-            rel_pos = pos.unsqueeze(1) - pos.unsqueeze(2) # z x m x m x d
-            rel_cluster_feat = cluster_feat.unsqueeze(1) - cluster_feat.unsqueeze(2) # z x m x m x c_
-            cluster_dist = (rel_cluster_feat**2).sum(-1) # z x m x m
-            cluster_dist = cluster_dist.unsqueeze(1) # z x 1 x m x m
-            attn = attn - cluster_dist
-        else:
+        if attend_means:
+            attn = (q @ key.transpose(-2, -1)) # b x h x n x k
             rel_pos = pos[:,None,:,:] - pos_orig[:,:,None,:] # b x n x k x d
+        else:
+            attn = (q*k).sum(-1) # b x h x n x m
+
+            rel_pos = pos_orig.unsqueeze(2) - pos.reshape(b,n,m,d) # b x n x m x d
+            rel_cluster_feat = cluster_feat_orig.unsqueeze(2) - cluster_feat.reshape(b,n,m,-1) # b x n x m x c_
+            cluster_dist = (rel_cluster_feat**2).sum(-1) # b x n x m
+            cluster_dist = cluster_dist.unsqueeze(-1)
+            attn = attn - cluster_dist
         
-        pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # z x h x m x m
+        pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # b x h x n x m 
         attn = attn + pos_bias 
         if mask is not None:
             if not attend_means:
-                mask = mask.reshape(z,1,1,m)
+                mask = mask.reshape(b,1,n,m)
             mask = (1-mask)*(-100) # 1->0, 0->-100
             attn = attn + mask
         attn = self.softmax(attn)
@@ -164,7 +193,7 @@ class ClusterAttention(nn.Module):
         if attend_means:
             feat = (attn @ v).reshape(b,h,n,c_).permute(0,2,1,3).reshape(b,n,c)
         else:
-            feat = (attn @ v).reshape(z,h,m,c_).permute(0,2,1,3).reshape(z,m,c) # z x m x c
+            feat = (attn.unsqueeze(-1)*v).sum(3).permute(0,2,1,3).reshape(b,n,c)
         feat = self.proj(feat)
         feat = self.proj_drop(feat)
         return feat
@@ -603,12 +632,13 @@ class BasicLayer(nn.Module):
             if cluster_mean is not None:
                 cluster_mean = cluster_mean.reshape(-1,1,c_)
                 cluster_score = ((cluster_feat_-cluster_mean)**2).sum(-1) # z x m
+                cluster_score = 1/(cluster_score+1e-8)
                 if cluster_mask is not None:
                     cluster_score = cluster_score + (1-cluster_mask)*(-1000)
                 cluster_score = F.softmax(cluster_score, dim=-1)
             else:
                 cluster_mean = cluster_feat_.mean(1,keepdim=True) # z x 1 x c_
-                cluster_score = F.softmax(((cluster_feat_-cluster_mean)**2).sum(-1),dim=-1) # z x m
+                cluster_score = F.softmax(1/(((cluster_feat_-cluster_mean)**2).sum(-1)+1e-8),dim=-1) # z x m
         else:
             member_idx = None
             batch_idx = None
