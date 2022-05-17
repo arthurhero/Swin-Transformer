@@ -611,7 +611,7 @@ class BasicLayer(nn.Module):
             cluster_pos_dist = ((cluster_pos-cluster_pos_mean)**2).sum(-1) # z x m
             cluster_dist = cluster_dist + (self.pos_lambda / d * c) * cluster_pos_dist
             if cluster_mask is not None:
-                cluster_score = cluster_score + (1-cluster_mask)*(-1000)
+                cluster_dist = cluster_dist + (1-cluster_mask)*(-1000)
             cluster_score = F.softmax(1/(cluster_dist+1e-8),dim=-1) # z x m
         else:
             member_idx = None
