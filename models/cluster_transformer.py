@@ -274,10 +274,10 @@ class ClusterMerging(nn.Module):
         act_layer=nn.GELU
 
         self.norm1 = norm_layer(dim)
-        self.qkv = nn.Linear(dim, 4 * dim, bias=True)
+        self.qkv = nn.Linear(dim, 3 * dim, bias=True)
         self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=True)
         self.softmax = nn.Softmax(dim=-1)
-        #self.proj = nn.Linear(2*dim, 2*dim)
+        self.proj = nn.Linear(dim, 2*dim)
 
         '''
         self.norm2 = norm_layer(dim)
@@ -311,9 +311,8 @@ class ClusterMerging(nn.Module):
         else:
             z,m=b,n
 
-        qkv = qkv.reshape(z,m,4,h,c_).permute(2,0,3,1,4) # 4 x z x h x m x c_
-        q, key, v = qkv[0], qkv[1], qkv[2:]  # z x h x m x c_
-        v = v.permute(1,2,3,0,4).reshape(z,h,m,-1) # z x h x m x 2c_
+        qkv = qkv.reshape(z,m,3,h,c_).permute(2,0,3,1,4) # 4 x z x h x m x c_
+        q, key, v = qkv[0], qkv[1], qkv[2]  # z x h x m x c_
         # downsample q
         # TODO: remove hard coded
         start=2
@@ -347,8 +346,8 @@ class ClusterMerging(nn.Module):
             attn = attn * mask
         #attn = self.softmax(attn)
 
-        feat = (attn @ v).reshape(z,h,-1,2*c_).permute(0,2,1,3).reshape(z,-1,2*c) # z x m_ x 2c
-        #feat = self.proj(feat) # z x m_ x 2c
+        feat = (attn @ v).reshape(z,h,-1,c_).permute(0,2,1,3).reshape(z,-1,c) # z x m_ x 2c
+        feat = self.proj(feat) # z x m_ x 2c
 
         # revert back to row
         if member_idx is not None:
@@ -599,9 +598,19 @@ class BasicLayer(nn.Module):
             else:
                 z=b*k
                 cluster_mask=None
-            cluster_feat_ = cluster_feat[batch_idx,member_idx].clone().reshape(z,m,-1)
+            def normalize(x):
+                mean = x.mean()
+                std = (x.view(-1).var(dim=0, unbiased=False)+1e-5).pow(0.5)
+                x = (x-mean) / std
+                return x
+            cluster_feat_ = normalize(cluster_feat)[batch_idx,member_idx].clone().reshape(z,m,-1)
+            cluster_pos = normalize(pos)[batch_idx,member_idx].clone().reshape(z,m,-1)
             cluster_mean = cluster_feat_.mean(1,keepdim=True) # z x 1 x c_
-            cluster_score = F.softmax(((cluster_feat_-cluster_mean)**2).sum(-1),dim=-1) # z x m
+            cluster_pos_mean = cluster_pos.mean(1,keepdim=True) # z x 1 x c_
+            cluster_dist = ((cluster_feat_-cluster_mean)**2).sum(-1) # z x m
+            cluster_pos_dist = ((cluster_pos-cluster_pos_mean)**2).sum(-1) # z x m
+            cluster_dist = cluster_dist + (self.pos_lambda / d * c) * cluster_pos_dist
+            cluster_score = F.softmax(1/(cluster_dist+1e-8),dim=-1) # z x m
         else:
             member_idx = None
             batch_idx = None
