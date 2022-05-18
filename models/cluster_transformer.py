@@ -326,8 +326,8 @@ class ClusterMerging(nn.Module):
         '''
         q = q * self.scale
         '''
-        q = q / (q.norm(2,dim=-1,keepdim=True)+1e-8)
-        key = key / (key.norm(2,dim=-1,keepdim=True)+1e-8)
+        q = q / (q.norm(2,dim=-1,keepdim=True)+1e-5)
+        key = key / (key.norm(2,dim=-1,keepdim=True)+1e-5)
         assert q.isnan().any()==False, 'cm q nan'
         assert key.isnan().any()==False, 'cm key nan'
         attn = (q @ key.transpose(-2, -1)) # z x h x m_ x m 
@@ -612,7 +612,9 @@ class BasicLayer(nn.Module):
             cluster_dist = cluster_dist + (self.pos_lambda / d * c) * cluster_pos_dist
             if cluster_mask is not None:
                 cluster_dist = cluster_dist + (1-cluster_mask)*(-1000)
-            cluster_score = F.softmax(1/(cluster_dist+1e-8),dim=-1) # z x m
+            cluster_score = F.softmax(1/(cluster_dist+1e-5),dim=-1) # z x m
+            assert torch.isnan(cluster_score).any()==False, "cluster score nan"
+            assert torch.isinf(cluster_score).any()==False, "cluster score inf"
         else:
             member_idx = None
             batch_idx = None
