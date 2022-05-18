@@ -306,10 +306,10 @@ class ClusterMerging(nn.Module):
         act_layer=nn.GELU
 
         self.norm1 = norm_layer(dim)
-        self.qkv = nn.Linear(dim, 4 * dim, bias=True)
+        self.qkv = nn.Linear(dim, 3 * dim, bias=True)
         self.pos_mlp = nn.Linear(pos_dim, num_heads, bias=True)
         self.softmax = nn.Softmax(dim=-1)
-        #self.proj = nn.Linear(2*dim, 2*dim)
+        self.proj = nn.Linear(dim, 2*dim)
 
         '''
         self.norm2 = norm_layer(dim)
@@ -343,9 +343,8 @@ class ClusterMerging(nn.Module):
         else:
             z,m=b,n
 
-        qkv = qkv.reshape(z,m,4,h,c_).permute(2,0,3,1,4) # 4 x z x h x m x c_
-        q, key, v = qkv[0], qkv[1], qkv[2:]  # z x h x m x c_
-        v = v.permute(1,2,3,0,4).reshape(z,h,m,-1) # z x h x m x 2c_
+        qkv = qkv.reshape(z,m,3,h,c_).permute(2,0,3,1,4) # 4 x z x h x m x c_
+        q, key, v = qkv[0], qkv[1], qkv[2]  # z x h x m x c_
         # downsample q
         # TODO: remove hard coded
         start=2
@@ -359,8 +358,8 @@ class ClusterMerging(nn.Module):
         '''
         q = q * self.scale
         '''
-        q = q / (q.norm(2,dim=-1,keepdim=True)+1e-8)
-        key = key / (key.norm(2,dim=-1,keepdim=True)+1e-8)
+        q = q / (q.norm(2,dim=-1,keepdim=True)+1e-5)
+        key = key / (key.norm(2,dim=-1,keepdim=True)+1e-5)
         assert q.isnan().any()==False, 'cm q nan'
         assert key.isnan().any()==False, 'cm key nan'
         attn = (q @ key.transpose(-2, -1)) # z x h x m_ x m 
@@ -379,8 +378,8 @@ class ClusterMerging(nn.Module):
             attn = attn * mask
         #attn = self.softmax(attn)
 
-        feat = (attn @ v).reshape(z,h,-1,2*c_).permute(0,2,1,3).reshape(z,-1,2*c) # z x m_ x 2c
-        #feat = self.proj(feat) # z x m_ x 2c
+        feat = (attn @ v).reshape(z,h,-1,c_).permute(0,2,1,3).reshape(z,-1,c) # z x m_ x 2c
+        feat = self.proj(feat) # z x m_ x 2c
 
         # revert back to row
         if member_idx is not None:
@@ -631,17 +630,29 @@ class BasicLayer(nn.Module):
             else:
                 z=b*k
                 cluster_mask=None
-            cluster_feat_ = cluster_feat[batch_idx,member_idx].clone().reshape(z,m,-1)
-            if cluster_mean is not None:
-                cluster_mean = cluster_mean.reshape(-1,1,c_)
-                cluster_score = ((cluster_feat_-cluster_mean)**2).sum(-1) # z x m
-                cluster_score = 1/(cluster_score+1e-8)
-                if cluster_mask is not None:
-                    cluster_score = cluster_score + (1-cluster_mask)*(-1000)
-                cluster_score = F.softmax(cluster_score, dim=-1)
-            else:
+            def normalize(x):
+                mean = x.mean()
+                std = (x.view(-1).var(dim=0, unbiased=False)+1e-5).pow(0.5)
+                x = (x-mean) / std
+                return x
+            cluster_feat_ = normalize(cluster_feat)[batch_idx,member_idx].clone().reshape(z,m,-1)
+            cluster_pos = normalize(pos)[batch_idx,member_idx].clone().reshape(z,m,-1)
+            if cluster_mask is None:
                 cluster_mean = cluster_feat_.mean(1,keepdim=True) # z x 1 x c_
-                cluster_score = F.softmax(1/(((cluster_feat_-cluster_mean)**2).sum(-1)+1e-8),dim=-1) # z x m
+                cluster_pos_mean = cluster_pos.mean(1,keepdim=True) # z x 1 x c_
+            else:
+                cluster_mean = cluster_feat_.sum(1,keepdim=True) # z x 1 x c_
+                cluster_pos_mean = cluster_pos.sum(1,keepdim=True) # z x 1 x c_
+                cluster_mean = cluster_mean / (cluster_mask.sum(1).view(z,1,1)+1e-5)
+                cluster_pos_mean = cluster_pos_mean / (cluster_mask.sum(1).view(z,1,1)+1e-5)
+            cluster_dist = ((cluster_feat_-cluster_mean)**2).sum(-1) # z x m
+            cluster_pos_dist = ((cluster_pos-cluster_pos_mean)**2).sum(-1) # z x m
+            cluster_dist = cluster_dist + (self.pos_lambda / d * c) * cluster_pos_dist
+            if cluster_mask is not None:
+                cluster_dist = cluster_dist + (1-cluster_mask)*(-1000)
+            cluster_score = F.softmax(1/(cluster_dist+1e-5),dim=-1) # z x m
+            assert torch.isnan(cluster_score).any()==False, "cluster score nan"
+            assert torch.isinf(cluster_score).any()==False, "cluster score inf"
         else:
             member_idx = None
             batch_idx = None
