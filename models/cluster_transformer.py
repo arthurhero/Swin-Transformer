@@ -136,11 +136,14 @@ class ClusterAttention(nn.Module):
 
         if attend_means:
             q = q.reshape(b,n,h,c_).permute(0,2,1,3) # b x h x n x c_
-            #qkv = qkv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
-            if mask is not None:
-                cluster_score = cluster_score.unsqueeze(-1) * mask
-            kv_ = (kv.reshape(z,m,2,h,c_) * cluster_score.reshape(z,m,1,1,1)).sum(1) # z x 2 x h x c_
-            pos = (pos*cluster_score.reshape(z,m,1)).sum(1) # z x d
+            if cluster_score is None:
+                kv_ = kv.reshape(z,m,2,h,c_).mean(1) # z x 2 x h x c_
+                pos = pos.mean(1) # z x d
+            else:
+                if mask is not None:
+                    cluster_score = cluster_score.unsqueeze(-1) * mask
+                kv_ = (kv.reshape(z,m,2,h,c_) * cluster_score.reshape(z,m,1,1,1)).sum(1) # z x 2 x h x c_
+                pos = (pos*cluster_score.reshape(z,m,1)).sum(1) # z x d
             if z == b*k:
                 kv = kv_.reshape(b,k,2,h,c_)
                 kv = kv.permute(2,0,3,1,4) # 2 x b x h x k x c_
@@ -612,7 +615,7 @@ class BasicLayer(nn.Module):
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                cluster_mean, mean_assignment, member_idx, valid_row_idx= kmeans(cluster_feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=2, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=False) # b x k x m
+                cluster_mean, mean_assignment, member_idx, valid_row_idx= kmeans(cluster_feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=2, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=False, normalize=False) # b x k x m
             _,k,m = member_idx.shape
             self.k=k
             batch_idx = torch.arange(b,device=feat.device).long().repeat_interleave(k*m) # b*k*m
@@ -635,8 +638,8 @@ class BasicLayer(nn.Module):
                 std = (x.view(-1).var(dim=0, unbiased=False)+1e-5).pow(0.5)
                 x = (x-mean) / std
                 return x
-            cluster_feat_ = normalize(cluster_feat)[batch_idx,member_idx].clone().reshape(z,m,-1)
-            cluster_pos = normalize(pos)[batch_idx,member_idx].clone().reshape(z,m,-1)
+            cluster_feat_ = cluster_feat[batch_idx,member_idx].clone().reshape(z,m,-1)
+            cluster_pos = pos[batch_idx,member_idx].clone().reshape(z,m,-1)
             if cluster_mask is None:
                 cluster_mean = cluster_feat_.mean(1,keepdim=True) # z x 1 x c_
                 cluster_pos_mean = cluster_pos.mean(1,keepdim=True) # z x 1 x c_
@@ -648,9 +651,10 @@ class BasicLayer(nn.Module):
             cluster_dist = ((cluster_feat_-cluster_mean)**2).sum(-1) # z x m
             cluster_pos_dist = ((cluster_pos-cluster_pos_mean)**2).sum(-1) # z x m
             cluster_dist = cluster_dist + (self.pos_lambda / d * c) * cluster_pos_dist
+            cluster_dist = 1/(cluster_dist+1e-5)
             if cluster_mask is not None:
                 cluster_dist = cluster_dist + (1-cluster_mask)*(-1000)
-            cluster_score = F.softmax(1/(cluster_dist+1e-5),dim=-1) # z x m
+            cluster_score = F.softmax(cluster_dist,dim=-1) # z x m
             assert torch.isnan(cluster_score).any()==False, "cluster score nan"
             assert torch.isinf(cluster_score).any()==False, "cluster score inf"
         else:
