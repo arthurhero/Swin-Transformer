@@ -1,6 +1,6 @@
 MODEL:
   TYPE: cluster
-  NAME: cluster_patch1_cifar_tmp
+  NAME: cluster_patch1_cifar_tmp2
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96
@@ -9,7 +9,7 @@ MODEL:
     PATCH_SIZE: 1
   CLUSTER:
     POS_DIM: 2
-    CLUSTER_SIZE: 12
+    CLUSTER_SIZE: 8
     MAX_CLUSTER_SIZE: 0
     POS_LAMBDA: [10.0,3.0,1.0]
 DATA:

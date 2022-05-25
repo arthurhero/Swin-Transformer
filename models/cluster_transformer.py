@@ -89,7 +89,7 @@ class ClusterAttention(nn.Module):
             k, number of clusters per sample
             q_subsample_idx, b x n' x 1
         """
-        cluster_size = 16
+        cluster_size = 8
         if mean_assignment is None:
             nnc = 1
         else:
@@ -114,7 +114,7 @@ class ClusterAttention(nn.Module):
             q = q.gather(index=q_subsample_idx.expand(-1,-1,c),dim=1) # b x n' x c
             mean_assignment = mean_assignment.gather(index=q_subsample_idx.expand(-1,-1,nnc),dim=1) # b x n' x nnc
             pos_orig = pos_orig.gather(index=q_subsample_idx.expand(-1,-1,d),dim=1) # b x n' x d
-            cluster_feat_orig = pos_orig.gather(index=q_subsample_idx.expand(-1,-1,c_),dim=1) # b x n' x c_
+            cluster_feat_orig = cluster_feat_orig.gather(index=q_subsample_idx.expand(-1,-1,c_),dim=1) # b x n' x c_
             if mask is not None:
                 mask_orig = mask.gather(index=q_subsample_idx,dim=1) # b x n' x 1
             else:
@@ -122,9 +122,9 @@ class ClusterAttention(nn.Module):
             n = q.shape[1]
 
         '''
+        '''
         pos = pos.to(feat.dtype)
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
-        '''
         
         if member_idx is not None:
             z,m = member_idx.shape
@@ -136,9 +136,10 @@ class ClusterAttention(nn.Module):
                 if cluster_mask is not None:
                     cluster_mask = cluster_mask.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b*n,nnc*m) # b x n x nnc*m
                     # sample a subset of neighbors
-                    neighbor_idx = cluster_mask.clamp(min=1e-5).multinomial(cluster_size).reshape(b,n,cluster_size) # b*n x cluster_size
+                    neighbor_idx = cluster_mask.to(feat.dtype).clamp(min=1e-5).multinomial(cluster_size).reshape(b,n,cluster_size) # b x n x cluster_size
+                    cluster_mask = cluster_mask.reshape(b,n,-1)
                 else:
-                    neighbor_idx = torch.ones_like(cluster_mask).multinomial(cluster_size).reshape(b,n,cluster_size) # b*n x cluster_size
+                    neighbor_idx = torch.ones_like(cluster_mask).multinomial(cluster_size).reshape(b,n,cluster_size) # b x n x cluster_size
                 member_idx = member_idx.gather(index=neighbor_idx,dim=-1) # b x n x m
                 if cluster_mask is not None:
                     cluster_mask = cluster_mask.gather(index=neighbor_idx,dim=-1) # b x n x m
@@ -494,9 +495,11 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
-            #self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+            '''
             self.downsample = downsample(dim=dim, pos_dim=pos_dim, num_heads = num_heads, 
                     drop=drop, attn_drop=attn_drop, norm_layer=norm_layer)
+            '''
         else:
             self.downsample = None
 
@@ -520,12 +523,13 @@ class BasicLayer(nn.Module):
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                cluster_mean, mean_assignment, member_idx, valid_row_idx= kmeans(cluster_feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=2, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=False, normalize=False) # b x k x m
+                cluster_mean, mean_assignment, member_idx, cluster_mask= kmeans(cluster_feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=2, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=False, normalize=True) # b x k x m
             _,k,m = member_idx.shape
             self.k=k
             batch_idx = torch.arange(b,device=feat.device).long().repeat_interleave(k*m) # b*k*m
             member_idx = member_idx.reshape(b*k,m)
             batch_idx = batch_idx.reshape(b*k,m)
+            '''
             if valid_row_idx is not None and len(valid_row_idx.shape)>1:
                 cluster_mask = valid_row_idx.reshape(-1,m)
                 valid_row_idx=None
@@ -562,6 +566,10 @@ class BasicLayer(nn.Module):
             cluster_score = F.softmax(cluster_dist,dim=-1) # z x m
             assert torch.isnan(cluster_score).any()==False, "cluster score nan"
             assert torch.isinf(cluster_score).any()==False, "cluster score inf"
+            '''
+            z=b*k
+            cluster_score=None
+            valid_row_idx = None
         else:
             member_idx = None
             batch_idx = None
@@ -580,8 +588,8 @@ class BasicLayer(nn.Module):
             assert torch.isinf(feat).any()==False, "feat inf after blk"
 
         if self.downsample is not None:
-            #pos, feat, mask = self.downsample(pos, feat, mask)
-            pos, feat, mask = self.downsample(pos, feat, mask, cluster_feat, mean_assignment, member_idx, batch_idx, k, valid_row_idx, cluster_mask)
+            pos, feat, mask = self.downsample(pos, feat, mask)
+            #pos, feat, mask = self.downsample(pos, feat, mask, cluster_feat, mean_assignment, member_idx, batch_idx, k, valid_row_idx, cluster_mask)
         assert torch.isnan(feat).any()==False, "feat 4 nan"
         assert torch.isinf(feat).any()==False, "feat 4 inf"
         return pos, feat, mask
@@ -642,10 +650,12 @@ class PatchEmbed(nn.Module):
         pos[:,:,:,1]=ys
         pos = pos.view(b,-1,2) #  b x n x 2
 
+        '''
         # normalize
         pos_mean = pos.mean()
         pos_std = (pos.view(-1).var(dim=0, unbiased=False)+1e-5).pow(0.5)
         pos = (pos-pos_mean) / pos_std
+        '''
 
         return pos, x, None
 
@@ -684,8 +694,8 @@ class ClusterTransformer(nn.Module):
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, 
-                 #downsample=PatchMerging,
-                 downsample=ClusterMerging,
+                 downsample=PatchMerging,
+                 #downsample=ClusterMerging,
                  use_checkpoint=False, **kwargs):
         super().__init__()
 
