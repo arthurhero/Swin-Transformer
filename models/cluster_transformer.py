@@ -134,6 +134,8 @@ class ClusterAttention(nn.Module):
                 batch_idx2 = torch.arange(b,device=mean_assignment.device,dtype=mean_assignment.dtype).reshape(-1,1,1).expand(-1,n,nnc) # b x n x nnc
                 member_idx = member_idx.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b,n,nnc*m) # b x n x nnc*m
                 self_idx_rotate = torch.arange(n,device=feat.device).long().repeat(b).unsqueeze(-1)
+                if q_subsample_idx is not None:
+                    self_idx_rotate = q_subsample_idx.reshape(b*n,1)
                 self_idx = (member_idx.reshape(b*n,-1)==self_idx_rotate).nonzero(as_tuple=True)
                 if cluster_mask is not None:
                     cluster_mask = cluster_mask.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b*n,nnc*m) # b*n x nnc*m
