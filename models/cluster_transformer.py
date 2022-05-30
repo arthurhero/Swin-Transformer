@@ -337,31 +337,17 @@ class ClusterMerging(nn.Module):
     def __init__(self, dim, pos_dim, num_heads, drop=0., attn_drop=0, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
-        act_layer=nn.GELU
-
-        self.norm1 = norm_layer(dim)
-
-        self.attn = ClusterAttention(
-            dim, num_heads=num_heads, pos_dim=pos_dim,
-            qkv_bias=True, pos_mlp_bias=True, qk_scale=self.scale, attn_drop=attn_drop, proj_drop=drop, output_dim=2*dim)
+        self.norm = norm_layer(4 * dim)
+        self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
 
         #self.importance_mlp = nn.Linear(dim, 1, bias=True)
-
-        '''
-        self.norm2 = norm_layer(dim)
-        mlp_ratio = 2.0
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=0.0)
-        '''
 
     def forward(self, pos, feat, mask, cluster_feat, mean_assignment, member_idx, batch_idx, k, valid_row_idx, cluster_mask):
 
         b,n,c = feat.shape
         d = pos.shape[2]
-        feat = self.norm1(feat)
+        nnc = mean_assignment.shape[-1]
+        cluster_size=4
 
         # sample from q
         max_x = pos[:,:,0].max()+1
@@ -371,11 +357,48 @@ class ClusterMerging(nn.Module):
         idx = torch.arange(n,device=pos.device).long().reshape(1,n,1).expand(b,-1,-1)
         idx = points2img(pos, idx, h, w) # b x 1 x h x w
         idx = idx[:,:,::2,::2].reshape(b,-1,1) # b x n' x 1
+        n = idx.shape[1]
         '''
         idx = torch.randperm(n,device=feat.device)[:n//4]
         idx = idx.reshape(1,n//4,1).expand(b,-1,-1) # b x n' x 1
         '''
-        pos, feat, mask = self.attn(pos, feat, cluster_feat, None, mean_assignment, mask, member_idx, batch_idx, k, valid_row_idx, attend_means=False, cluster_mask=cluster_mask, q_subsample_idx=idx)
+
+        mean_assignment = mean_assignment.gather(index=q_subsample_idx.expand(-1,-1,nnc),dim=1) # b x n' x nnc
+        pos= pos.gather(index=q_subsample_idx.expand(-1,-1,d),dim=1) # b x n' x d
+        if mask is not None:
+            mask= mask.gather(index=q_subsample_idx,dim=1) # b x n' x 1
+        else:
+            mask= None
+
+        # randomly pick neighbors
+        batch_idx2 = torch.arange(b,device=mean_assignment.device,dtype=mean_assignment.dtype).reshape(-1,1,1).expand(-1,n,nnc) # b x n x nnc
+        member_idx = member_idx.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b,n,nnc*m) # b x n x nnc*m
+        self_idx_rotate = idx
+        self_idx = (member_idx.reshape(b*n,-1)==self_idx_rotate).nonzero(as_tuple=True)
+        if cluster_mask is not None:
+            cluster_mask = cluster_mask.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b*n,nnc*m) # b*n x nnc*m
+            cluster_mask[self_idx]=0
+            # sample a subset of neighbors
+            neighbor_idx = cluster_mask.to(feat.dtype).clamp(min=1e-5).multinomial(cluster_size-1).reshape(b,n,cluster_size-1) # b x n x cluster_size-1
+            cluster_mask = cluster_mask.reshape(b,n,-1)
+        else:
+            ones = torch.ones_like(member_idx).reshape(b*n,-1)
+            ones[self_idx]=1e-5
+            neighbor_idx = ones.multinomial(cluster_size-1).reshape(b,n,cluster_size-1) # b x n x cluster_size-1
+        member_idx = member_idx.gather(index=neighbor_idx,dim=-1) # b x n x m-1
+        member_idx = torch.cat([member_idx,self_idx_rotate.reshape(b,n,1)],dim=-1) # b x n x cluster_size
+        if cluster_mask is not None:
+            cluster_mask = cluster_mask.gather(index=neighbor_idx,dim=-1) # b x n x m-1
+            cluster_mask = torch.cat([cluster_mask,torch.ones(b,n,1,device=cluster_mask.device,dtype=cluster_mask.dtype)],dim=-1) # b x n x cluster_size
+        batch_idx = torch.arange(b,device=mean_assignment.device,dtype=mean_assignment.dtype).reshape(-1,1,1).expand(-1,n,cluster_size) # b x n x m
+        m = cluster_size
+
+        member_idx = member_idx.reshape(-1) # z*m
+        batch_idx = batch_idx.reshape(-1) # z*m
+        feat = feat[batch_idx,member_idx].clone().reshape(b,n,-1) # b x n x 4*c
+
+        feat = self.norm(feat)
+        feat = self.reduction(feat)
 
         '''
         # normalize
