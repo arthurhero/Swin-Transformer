@@ -89,7 +89,7 @@ class ClusterAttention(nn.Module):
             k, number of clusters per sample
             q_subsample_idx, b x n' x 1
         """
-        cluster_size = 8
+        cluster_size = 4
         if mean_assignment is None:
             nnc = 1
         else:
@@ -133,16 +133,23 @@ class ClusterAttention(nn.Module):
                 # collect nearest clusters for each point
                 batch_idx2 = torch.arange(b,device=mean_assignment.device,dtype=mean_assignment.dtype).reshape(-1,1,1).expand(-1,n,nnc) # b x n x nnc
                 member_idx = member_idx.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b,n,nnc*m) # b x n x nnc*m
+                self_idx_rotate = torch.arange(n,device=feat.device).long().repeat(b).unsqueeze(-1)
+                self_idx = (member_idx.reshape(b*n,-1)==self_idx_rotate).nonzero(as_tuple=True)
                 if cluster_mask is not None:
-                    cluster_mask = cluster_mask.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b*n,nnc*m) # b x n x nnc*m
+                    cluster_mask = cluster_mask.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b*n,nnc*m) # b*n x nnc*m
+                    cluster_mask[self_idx]=0
                     # sample a subset of neighbors
-                    neighbor_idx = cluster_mask.to(feat.dtype).clamp(min=1e-5).multinomial(cluster_size).reshape(b,n,cluster_size) # b x n x cluster_size
+                    neighbor_idx = cluster_mask.to(feat.dtype).clamp(min=1e-5).multinomial(cluster_size-1).reshape(b,n,cluster_size-1) # b x n x cluster_size-1
                     cluster_mask = cluster_mask.reshape(b,n,-1)
                 else:
-                    neighbor_idx = torch.ones_like(cluster_mask).multinomial(cluster_size).reshape(b,n,cluster_size) # b x n x cluster_size
-                member_idx = member_idx.gather(index=neighbor_idx,dim=-1) # b x n x m
+                    ones = torch.ones_like(member_idx).reshape(b*n,-1)
+                    ones[self_idx]=1e-5
+                    neighbor_idx = ones.multinomial(cluster_size-1).reshape(b,n,cluster_size-1) # b x n x cluster_size-1
+                member_idx = member_idx.gather(index=neighbor_idx,dim=-1) # b x n x m-1
+                member_idx = torch.cat([member_idx,self_idx_rotate.reshape(b,n,1)],dim=-1) # b x n x cluster_size
                 if cluster_mask is not None:
-                    cluster_mask = cluster_mask.gather(index=neighbor_idx,dim=-1) # b x n x m
+                    cluster_mask = cluster_mask.gather(index=neighbor_idx,dim=-1) # b x n x m-1
+                    cluster_mask = torch.cat([cluster_mask,torch.ones(b,n,1,device=cluster_mask.device,dtype=cluster_mask.dtype)],dim=-1) # b x n x cluster_size
                 batch_idx = torch.arange(b,device=mean_assignment.device,dtype=mean_assignment.dtype).reshape(-1,1,1).expand(-1,n,cluster_size) # b x n x m
                 m = cluster_size
                 z = b*n
@@ -201,10 +208,12 @@ class ClusterAttention(nn.Module):
             attn = (q*k).sum(-1) # b x h x n x m
 
             rel_pos = pos_orig.unsqueeze(2) - pos.reshape(b,n,m,d) # b x n x m x d
+            '''
             rel_cluster_feat = cluster_feat_orig.unsqueeze(2) - cluster_feat.reshape(b,n,m,-1) # b x n x m x c_
             cluster_dist = (rel_cluster_feat**2).sum(-1) # b x n x m
             cluster_dist = cluster_dist.unsqueeze(1)
             attn = attn - cluster_dist
+            '''
         
         pos_bias = self.pos_mlp(rel_pos).permute(0,3,1,2) # b x h x n x m / b x h x n x k
         attn = attn + pos_bias 
@@ -355,15 +364,26 @@ class ClusterMerging(nn.Module):
         feat = self.norm1(feat)
 
         # sample from q
+        max_x = pos[:,:,0].max()+1
+        max_y = pos[:,:,1].max()+1
+        h = (torch.ceil(max_y / 2.0)*2).long().item() # make sure the number is even
+        w = (torch.ceil(max_x / 2.0)*2).long().item()
+        idx = torch.arange(n,device=pos.device).long().reshape(1,n,1).expand(b,-1,-1)
+        idx = points2img(pos, idx, h, w) # b x 1 x h x w
+        idx = idx[:,:,::2,::2].reshape(b,-1,1) # b x n' x 1
+        '''
         idx = torch.randperm(n,device=feat.device)[:n//4]
         idx = idx.reshape(1,n//4,1).expand(b,-1,-1) # b x n' x 1
-
+        '''
         pos, feat, mask = self.attn(pos, feat, cluster_feat, None, mean_assignment, mask, member_idx, batch_idx, k, valid_row_idx, attend_means=False, cluster_mask=cluster_mask, q_subsample_idx=idx)
 
+        '''
         # normalize
         pos_mean = pos.mean()
         pos_std = (pos.view(-1).var(dim=0, unbiased=False)+1e-5).pow(0.5)
         pos = (pos-pos_mean) / pos_std
+        '''
+        pos = pos.div(2,rounding_mode='floor')
 
         return pos, feat, mask
 
@@ -495,11 +515,11 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
+            '''
             self.downsample = downsample(dim=dim, norm_layer=norm_layer)
             '''
             self.downsample = downsample(dim=dim, pos_dim=pos_dim, num_heads = num_heads, 
-                    drop=drop, attn_drop=attn_drop, norm_layer=norm_layer)
-            '''
+                    drop=0.0, attn_drop=0.0, norm_layer=norm_layer)
         else:
             self.downsample = None
 
@@ -579,6 +599,7 @@ class BasicLayer(nn.Module):
 
         for i_blk in range(len(self.blocks)):
             attend_means = i_blk % 2
+            #attend_means = 0
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
                 feat, pos = checkpoint.checkpoint(pos, feat, cluster_feat, cluster_score, mean_assignment, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
@@ -588,8 +609,8 @@ class BasicLayer(nn.Module):
             assert torch.isinf(feat).any()==False, "feat inf after blk"
 
         if self.downsample is not None:
-            pos, feat, mask = self.downsample(pos, feat, mask)
-            #pos, feat, mask = self.downsample(pos, feat, mask, cluster_feat, mean_assignment, member_idx, batch_idx, k, valid_row_idx, cluster_mask)
+            #pos, feat, mask = self.downsample(pos, feat, mask)
+            pos, feat, mask = self.downsample(pos, feat, mask, cluster_feat, mean_assignment, member_idx, batch_idx, k, valid_row_idx, cluster_mask)
         assert torch.isnan(feat).any()==False, "feat 4 nan"
         assert torch.isinf(feat).any()==False, "feat 4 inf"
         return pos, feat, mask
@@ -694,8 +715,8 @@ class ClusterTransformer(nn.Module):
                  mlp_ratio=4., qkv_bias=True, pos_mlp_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True, 
-                 downsample=PatchMerging,
-                 #downsample=ClusterMerging,
+                 #downsample=PatchMerging,
+                 downsample=ClusterMerging,
                  use_checkpoint=False, **kwargs):
         super().__init__()
 
