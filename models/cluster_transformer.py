@@ -350,6 +350,7 @@ class ClusterMerging(nn.Module):
         d = pos.shape[2]
         nnc = mean_assignment.shape[-1]
         cluster_size=4
+        z,m=member_idx.shape
 
         # sample from q
         max_x = pos[:,:,0].max()+1
@@ -365,17 +366,17 @@ class ClusterMerging(nn.Module):
         idx = idx.reshape(1,n//4,1).expand(b,-1,-1) # b x n' x 1
         '''
 
-        mean_assignment = mean_assignment.gather(index=q_subsample_idx.expand(-1,-1,nnc),dim=1) # b x n' x nnc
-        pos= pos.gather(index=q_subsample_idx.expand(-1,-1,d),dim=1) # b x n' x d
+        mean_assignment = mean_assignment.gather(index=idx.expand(-1,-1,nnc),dim=1) # b x n' x nnc
+        pos= pos.gather(index=idx.expand(-1,-1,d),dim=1) # b x n' x d
         if mask is not None:
-            mask= mask.gather(index=q_subsample_idx,dim=1) # b x n' x 1
+            mask= mask.gather(index=idx,dim=1) # b x n' x 1
         else:
             mask= None
 
         # randomly pick neighbors
         batch_idx2 = torch.arange(b,device=mean_assignment.device,dtype=mean_assignment.dtype).reshape(-1,1,1).expand(-1,n,nnc) # b x n x nnc
         member_idx = member_idx.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b,n,nnc*m) # b x n x nnc*m
-        self_idx_rotate = idx
+        self_idx_rotate = idx.reshape(b*n,1)
         self_idx = (member_idx.reshape(b*n,-1)==self_idx_rotate).nonzero(as_tuple=True)
         if cluster_mask is not None:
             cluster_mask = cluster_mask.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b*n,nnc*m) # b*n x nnc*m
