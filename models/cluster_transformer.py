@@ -339,10 +339,20 @@ class ClusterMerging(nn.Module):
     def __init__(self, dim, pos_dim, num_heads, drop=0., attn_drop=0, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
-        self.norm = norm_layer(4 * dim)
-        self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
 
-        #self.importance_mlp = nn.Linear(dim, 1, bias=True)
+        self.norm = nn.LayerNorm(dim)
+        self.weight_net = nn.Sequential(
+                    nn.Linear(pos_dim,32),
+                    nn.LayerNorm(32),
+                    nn.GELU()
+                )
+        self.feat_net = nn.Sequential(
+                    nn.Linear(dim,dim//3),
+                    nn.GELU(),
+                    nn.Linear(dim//3,1),
+                    nn.Sigmoid()
+                )
+        self.linear = nn.Linear(dim*32,dim*2)
 
     def forward(self, pos, feat, mask, cluster_feat, mean_assignment, member_idx, batch_idx, k, valid_row_idx, cluster_mask):
 
@@ -351,6 +361,8 @@ class ClusterMerging(nn.Module):
         nnc = mean_assignment.shape[-1]
         cluster_size=4
         z,m=member_idx.shape
+
+        feat = self.norm(feat)
 
         # sample from q
         max_x = pos[:,:,0].max()+1
@@ -367,7 +379,9 @@ class ClusterMerging(nn.Module):
         '''
 
         mean_assignment = mean_assignment.gather(index=idx.expand(-1,-1,nnc),dim=1) # b x n' x nnc
-        pos= pos.gather(index=idx.expand(-1,-1,d),dim=1) # b x n' x d
+        pos_orig = pos
+        pos = pos.gather(index=idx.expand(-1,-1,d),dim=1) # b x n' x d
+        feat_down = feat.gather(index=idx.expand(-1,-1,c),dim=1) # b x n' x c
         if mask is not None:
             mask= mask.gather(index=idx,dim=1) # b x n' x 1
         else:
@@ -398,10 +412,17 @@ class ClusterMerging(nn.Module):
 
         member_idx = member_idx.reshape(-1) # z*m
         batch_idx = batch_idx.reshape(-1) # z*m
-        feat = feat[batch_idx,member_idx].clone().reshape(b,n,-1) # b x n x 4*c
+        feat = feat[batch_idx,member_idx].clone().reshape(b,n,m,c) # b x n x m x c
+        pos_rel = pos_orig[batch_idx,member_idx].clone().reshape(b,n,m,d) # b x n x m x d
+        pos_rel = pos_rel - pos.unsqueeze(2)
+        weights = self.weight_net(pos_rel) # b x n x m x 32
+        feat_rel = feat - feat_down.unsqueeze(2) # b x n x m x c
+        feat_weights = self.feat_net(feat_rel) # b x n x m x 1
+        weights = weights * feat_weights
+        feat = (weights.permute(0,1,3,2) @ feat).view(b,n,-1) # b x n x 32c
+        feat = self.linear(feat) # b x n x 2c
 
-        feat = self.norm(feat)
-        feat = self.reduction(feat)
+
 
         '''
         # normalize
