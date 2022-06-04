@@ -340,10 +340,10 @@ class ClusterMerging(nn.Module):
         super().__init__()
         self.dim = dim
 
-        self.norm = nn.LayerNorm(dim)
+        inner_ch=4
         self.weight_net = nn.Sequential(
-                    nn.Linear(pos_dim,32),
-                    nn.LayerNorm(32),
+                    nn.Linear(pos_dim,inner_ch),
+                    nn.LayerNorm(inner_ch),
                     nn.GELU()
                 )
         self.feat_net = nn.Sequential(
@@ -352,17 +352,16 @@ class ClusterMerging(nn.Module):
                     nn.Linear(dim//3,1),
                     nn.Sigmoid()
                 )
-        self.linear = nn.Linear(dim*32,dim*2)
+        self.norm = nn.LayerNorm(inner_ch*dim)
+        self.linear = nn.Linear(dim*inner_ch,dim*2)
 
     def forward(self, pos, feat, mask, cluster_feat, mean_assignment, member_idx, batch_idx, k, valid_row_idx, cluster_mask):
 
         b,n,c = feat.shape
         d = pos.shape[2]
         nnc = mean_assignment.shape[-1]
-        cluster_size=4
+        cluster_size=8
         z,m=member_idx.shape
-
-        feat = self.norm(feat)
 
         # sample from q
         max_x = pos[:,:,0].max()+1
@@ -379,7 +378,19 @@ class ClusterMerging(nn.Module):
         '''
 
         mean_assignment = mean_assignment.gather(index=idx.expand(-1,-1,nnc),dim=1) # b x n' x nnc
+        pos_orig_ = pos.clone()
+
+        '''
+        pos = pos.to(feat.dtype)
+        pos_mean = pos.mean()
+        pos_std = (pos.view(-1).var(dim=0, unbiased=False)+1e-5).pow(0.5)
+        pos = (pos-pos_mean) / pos_std
+        pos = pos.to(feat.dtype)
+        pos = pos / pos.view(-1,d).max(0)[0] # normalize
+        '''
+
         pos_orig = pos
+
         pos = pos.gather(index=idx.expand(-1,-1,d),dim=1) # b x n' x d
         feat_down = feat.gather(index=idx.expand(-1,-1,c),dim=1) # b x n' x c
         if mask is not None:
@@ -420,6 +431,9 @@ class ClusterMerging(nn.Module):
         feat_weights = self.feat_net(feat_rel) # b x n x m x 1
         weights = weights * feat_weights
         feat = (weights.permute(0,1,3,2) @ feat).view(b,n,-1) # b x n x 32c
+
+        feat = self.norm(feat)
+
         feat = self.linear(feat) # b x n x 2c
 
 
@@ -430,6 +444,7 @@ class ClusterMerging(nn.Module):
         pos_std = (pos.view(-1).var(dim=0, unbiased=False)+1e-5).pow(0.5)
         pos = (pos-pos_mean) / pos_std
         '''
+        pos = pos_orig_.gather(index=idx.expand(-1,-1,d),dim=1) # b x n' x d
         pos = pos.div(2,rounding_mode='floor')
 
         return pos, feat, mask
