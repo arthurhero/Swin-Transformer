@@ -648,7 +648,10 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
     end1 = time.time()
     #print("time perc", (end2-start2) / (end1-start1))
     
-    return means, mean_assignment, reverse_assignment, valid_assignment_mask 
+    if pos is not None:
+        return means, means_pos, mean_assignment, reverse_assignment, valid_assignment_mask 
+    else:
+        return means, mean_assignment, reverse_assignment, valid_assignment_mask 
 
 
 

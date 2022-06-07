@@ -192,6 +192,7 @@ class ClusterAttention(nn.Module):
                 if mask is not None:
                     cluster_score = cluster_score * mask
             feat = (feat * cluster_score).sum(1).reshape(b,k,c) # b x k x c
+            feat = feat.unsqueeze(1).expand(-1,n,-1,-1) # b x n x k x c
             pos = (pos * cluster_score).sum(1).reshape(b,k,d) # b x k x d
             if mask is not None:
                 mask = (mask.sum(1)>0).long().reshape(b,1,k,1) # b x 1 x k x 1
@@ -200,7 +201,7 @@ class ClusterAttention(nn.Module):
 
         if attend_means:
             rel_pos = pos[:,None,:,:] - pos_orig[:,:,None,:] # b x n x k x d
-            #rel_feat = feat - feat_orig[:,:,None,:] # b x n x k x c
+            rel_feat = feat - feat_orig[:,:,None,:] # b x n x k x c
         else:
             feat = feat.reshape(b,n,m,-1)
             rel_pos = pos_orig.unsqueeze(2) - pos.reshape(b,n,m,d) # b x n x m x d
@@ -594,16 +595,31 @@ class BasicLayer(nn.Module):
         assert self.cluster_size > 0, 'self.cluster_size must be positive'
         self.k = int(math.ceil(n / float(self.cluster_size)))
         k = self.k
+        k2 = 16
         cluster_feat = self.cluster_feat_mlp(feat) # b x n x c_
         if self.k>1:
             # perform k-means
             with torch.no_grad():
-                cluster_mean, mean_assignment, member_idx, cluster_mask= kmeans(cluster_feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=2, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=False, normalize=True) # b x k x m
+                cluster_mean, cluster_mean_pos, mean_assignment, member_idx, cluster_mask= kmeans(cluster_feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=2, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=False, normalize=True) # b x k x m
+                _, _, mean_assignment2, member_idx2, cluster_mask2= kmeans(cluster_mean, k2, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos=cluster_mean_pos, pos_lambda=self.pos_lambda, valid_mask=None, init='random',balanced=True, fillup=False, normalize=True) # b x k2 x m'
             _,k,m = member_idx.shape
             self.k=k
+            # merge clusters
+            m_ = member_idx2.shape[-1]
+            member_idx2_ = member_idx.gather(dim=1,index=member_idx2.reshape(b,-1).unsqueeze(-1).expand(-1,-1,m)) # b x k2*m' x m
+            member_idx2_ = member_idx2_.reshape(b,k2,m_*m) # b x k2 x m'*m
+            cluster_mask2_ = cluster_mask.gather(dim=1,index=member_idx2.reshape(b,-1).unsqueeze(-1).expand(-1,-1,m)) # b x k2*m' x m
+            cluster_mask2_ = cluster_mask2_.reshape(b,k2,m_*m) # b x k2 x m'*m
+            cluster_mask2_ = cluster_mask2_ * cluster_mask2.unsqueeze(-1).expand(-1,-1,-1,m).view(b,k2,-1) # b x k2 x m'*m
+            member_idx2 = member_idx2_.reshape(b*k2,-1)
+            cluster_mask2 = cluster_mask2_.reshape(b*k2,-1)
+
             batch_idx = torch.arange(b,device=feat.device).long().repeat_interleave(k*m) # b*k*m
             member_idx = member_idx.reshape(b*k,m)
             batch_idx = batch_idx.reshape(b*k,m)
+
+            batch_idx2 = torch.arange(b,device=feat.device).long().repeat_interleave(k2*m_*m) # b*k2*m'*m
+            batch_idx2 = batch_idx2.reshape(b*k2,m_*m)
             '''
             if valid_row_idx is not None and len(valid_row_idx.shape)>1:
                 cluster_mask = valid_row_idx.reshape(-1,m)
@@ -653,13 +669,19 @@ class BasicLayer(nn.Module):
             cluster_score = None
 
         for i_blk in range(len(self.blocks)):
-            #attend_means = i_blk % 2
-            attend_means = 0
+            attend_means = i_blk % 2
+            #attend_means = 0
             blk = self.blocks[i_blk]
-            if self.use_checkpoint:
-                feat, pos = checkpoint.checkpoint(pos, feat, cluster_feat, cluster_score, mean_assignment, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
+            if attend_means:
+                if self.use_checkpoint:
+                    feat, pos = checkpoint.checkpoint(pos, feat, cluster_feat, cluster_score, mean_assignment, mask, member_idx2, batch_idx2, k2, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask2)
+                else:
+                    feat, pos = blk(pos, feat, cluster_feat, cluster_score, mean_assignment, mask,  member_idx2, batch_idx2, k2, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask2)
             else:
-                feat, pos = blk(pos, feat, cluster_feat, cluster_score, mean_assignment, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
+                if self.use_checkpoint:
+                    feat, pos = checkpoint.checkpoint(pos, feat, cluster_feat, cluster_score, mean_assignment, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
+                else:
+                    feat, pos = blk(pos, feat, cluster_feat, cluster_score, mean_assignment, mask,  member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
             assert torch.isnan(feat).any()==False, "feat nan after blk"
             assert torch.isinf(feat).any()==False, "feat inf after blk"
 
