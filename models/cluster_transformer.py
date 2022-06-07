@@ -57,6 +57,7 @@ class ClusterAttention(nn.Module):
         super().__init__()
         self.dim = dim
         self.pos_dim = pos_dim
+        self.num_heads = num_heads
 
         inner_ch=4
         self.weight_net = nn.Sequential(
