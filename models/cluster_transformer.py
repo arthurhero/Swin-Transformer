@@ -74,9 +74,9 @@ class ClusterAttention(nn.Module):
 
         self.attn_drop = nn.Dropout(attn_drop)
         if output_dim is None:
-            self.proj = nn.Linear(dim, dim)
+            self.proj = nn.Linear(inner_ch*dim, dim)
         else:
-            self.proj = nn.Linear(dim, output_dim)
+            self.proj = nn.Linear(inner_ch*dim, output_dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, pos, feat, cluster_feat, cluster_score, mean_assignment, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None, q_subsample_idx=None):
@@ -95,13 +95,14 @@ class ClusterAttention(nn.Module):
             k, number of clusters per sample
             q_subsample_idx, b x n' x 1
         """
-        cluster_size = 4
+        cluster_size = 8
         if mean_assignment is None:
             nnc = 1
         else:
             nnc = mean_assignment.shape[-1] # number of nearest clusters
 
         b,n,c=feat.shape
+        c_ = c // self.num_heads
         d = pos.shape[2]
         assert c == self.dim, "dim does not accord to input"
         assert d == self.pos_dim, "pos dim does not accord to input"
@@ -110,6 +111,7 @@ class ClusterAttention(nn.Module):
         pos_orig = pos.clone() # b x n x d
         cluster_feat_orig = cluster_feat.clone() # b x n x c_
 
+        '''
         if q_subsample_idx is not None:
             q = q.gather(index=q_subsample_idx.expand(-1,-1,c),dim=1) # b x n' x c
             mean_assignment = mean_assignment.gather(index=q_subsample_idx.expand(-1,-1,nnc),dim=1) # b x n' x nnc
@@ -120,11 +122,12 @@ class ClusterAttention(nn.Module):
             else:
                 mask_orig = None
             n = q.shape[1]
+        '''
 
+        '''
         '''
         pos = pos.to(feat.dtype)
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
-        '''
         
         if member_idx is not None:
             z,m = member_idx.shape
@@ -134,8 +137,10 @@ class ClusterAttention(nn.Module):
                 batch_idx2 = torch.arange(b,device=mean_assignment.device,dtype=mean_assignment.dtype).reshape(-1,1,1).expand(-1,n,nnc) # b x n x nnc
                 member_idx = member_idx.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b,n,nnc*m) # b x n x nnc*m
                 self_idx_rotate = torch.arange(n,device=feat.device).long().repeat(b).unsqueeze(-1)
+                '''
                 if q_subsample_idx is not None:
                     self_idx_rotate = q_subsample_idx.reshape(b*n,1)
+                '''
                 self_idx = (member_idx.reshape(b*n,-1)==self_idx_rotate).nonzero(as_tuple=True)
                 if cluster_mask is not None:
                     cluster_mask = cluster_mask.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b*n,nnc*m) # b*n x nnc*m
@@ -176,17 +181,17 @@ class ClusterAttention(nn.Module):
 
         if attend_means:
             if cluster_score is None:
-                cluster_score = torch.ones(z,m,1,device=kv.device)
+                cluster_score = torch.ones(z,m,1,device=feat.device)
                 if mask is not None:
                     cluster_score = cluster_score / (mask.sum(1,keepdim=True)+1e-5) # z x m x 1
                     cluster_score = cluster_score * mask
                 else:
                     cluster_score = cluster_score / m
             else:
+                cluster_score = cluster_score.unsqueeze(-1)
                 if mask is not None:
-                    cluster_score = cluster_score.unsqueeze(-1) * mask
+                    cluster_score = cluster_score * mask
             feat = (feat * cluster_score).sum(1).reshape(b,k,c) # b x k x c
-            feat = feat.unsqueeze(1).expand(-1,n,-1,-1) # b x n x k x c
             pos = (pos * cluster_score).sum(1).reshape(b,k,d) # b x k x d
             if mask is not None:
                 mask = (mask.sum(1)>0).long().reshape(b,1,k,1) # b x 1 x k x 1
@@ -195,10 +200,11 @@ class ClusterAttention(nn.Module):
 
         if attend_means:
             rel_pos = pos[:,None,:,:] - pos_orig[:,:,None,:] # b x n x k x d
-            rel_feat = feat - feat_orig[:,:,None,:] # b x n x k x c
+            #rel_feat = feat - feat_orig[:,:,None,:] # b x n x k x c
         else:
+            feat = feat.reshape(b,n,m,-1)
             rel_pos = pos_orig.unsqueeze(2) - pos.reshape(b,n,m,d) # b x n x m x d
-            rel_feat = feat_orig.unsqueeze(2) - feat.reshape(b,n,m,c) # b x n x m x c
+            rel_feat = feat_orig.unsqueeze(2) - feat # b x n x m x c
             if mask is not None:
                 mask = mask.reshape(b,n,m,1)
             '''
@@ -264,9 +270,11 @@ class ClusterTransformerBlock(nn.Module):
             qkv_bias=qkv_bias, pos_mlp_bias=pos_mlp_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        '''
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        '''
 
     def forward(self, pos, feat, cluster_feat, cluster_score, mean_assignment, mask, member_idx, batch_idx, k, valid_row_idx, attend_means, cluster_mask=None):
         """
@@ -308,7 +316,7 @@ class ClusterTransformerBlock(nn.Module):
 
         # FFN
         feat = shortcut + self.drop_path(feat)
-        feat = feat + self.drop_path(self.mlp(self.norm2(feat)))
+        #feat = feat + self.drop_path(self.mlp(self.norm2(feat)))
 
         return feat, pos
 
@@ -645,8 +653,8 @@ class BasicLayer(nn.Module):
             cluster_score = None
 
         for i_blk in range(len(self.blocks)):
-            attend_means = i_blk % 2
-            #attend_means = 0
+            #attend_means = i_blk % 2
+            attend_means = 0
             blk = self.blocks[i_blk]
             if self.use_checkpoint:
                 feat, pos = checkpoint.checkpoint(pos, feat, cluster_feat, cluster_score, mean_assignment, mask, member_idx, batch_idx, k, valid_row_idx, attend_means = attend_means, cluster_mask=cluster_mask)
