@@ -95,7 +95,7 @@ class ClusterAttention(nn.Module):
             k, number of clusters per sample
             q_subsample_idx, b x n' x 1
         """
-        cluster_size = 8
+        cluster_size = 4
         if mean_assignment is None:
             nnc = 1
         else:
@@ -610,7 +610,7 @@ class BasicLayer(nn.Module):
             member_idx2_ = member_idx2_.reshape(b,k2,m_*m) # b x k2 x m'*m
             cluster_mask2_ = cluster_mask.gather(dim=1,index=member_idx2.reshape(b,-1).unsqueeze(-1).expand(-1,-1,m)) # b x k2*m' x m
             cluster_mask2_ = cluster_mask2_.reshape(b,k2,m_*m) # b x k2 x m'*m
-            cluster_mask2_ = cluster_mask2_ * cluster_mask2.unsqueeze(-1).expand(-1,-1,-1,m).view(b,k2,-1) # b x k2 x m'*m
+            cluster_mask2_ = cluster_mask2_ * cluster_mask2.unsqueeze(-1).expand(-1,-1,-1,m).reshape(b,k2,-1) # b x k2 x m'*m
             member_idx2 = member_idx2_.reshape(b*k2,-1)
             cluster_mask2 = cluster_mask2_.reshape(b*k2,-1)
 

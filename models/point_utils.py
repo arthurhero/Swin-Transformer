@@ -642,13 +642,12 @@ def kmeans(points, k, max_cluster_size=None, num_nearest_mean=1, num_iter=10, po
         mean_assignment = dist.argKmin(num_nearest_mean,dim=2).long() # b x n x num_mean
 
     means = means.to(old_dtype)
-    del points
-    if pos is not None:
-        del pos
     end1 = time.time()
     #print("time perc", (end2-start2) / (end1-start1))
     
+    del points
     if pos is not None:
+        del pos
         return means, means_pos, mean_assignment, reverse_assignment, valid_assignment_mask 
     else:
         return means, mean_assignment, reverse_assignment, valid_assignment_mask 
