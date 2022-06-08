@@ -126,9 +126,9 @@ class ClusterAttention(nn.Module):
         '''
 
         '''
-        '''
         pos = pos.to(feat.dtype)
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
+        '''
         
         if member_idx is not None:
             z,m = member_idx.shape
@@ -219,7 +219,7 @@ class ClusterAttention(nn.Module):
         feat_weights = self.feat_net(rel_feat) # b x n x k x h / b x n x m x h
         if mask is not None:
             feat_weights = feat_weights * mask
-        feat_weights = feat_weights.repeat_interleave(c_) # b x n x k x c / b x n x m x c
+        feat_weights = feat_weights.repeat_interleave(c_,dim=-1) # b x n x k x c / b x n x m x c
         #weights = weights * feat_weights
         feat = feat * feat_weights
         
