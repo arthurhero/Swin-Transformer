@@ -68,7 +68,7 @@ class ClusterAttention(nn.Module):
         self.feat_net = nn.Sequential(
                     nn.Linear(dim,dim//3),
                     nn.GELU(),
-                    nn.Linear(dim//3,1),
+                    nn.Linear(dim//3,num_heads),
                     nn.Sigmoid()
                 )
 
@@ -106,6 +106,7 @@ class ClusterAttention(nn.Module):
         d = pos.shape[2]
         assert c == self.dim, "dim does not accord to input"
         assert d == self.pos_dim, "pos dim does not accord to input"
+        h = self.num_heads
 
         feat_orig = feat.clone() # b x n x c
         pos_orig = pos.clone() # b x n x d
@@ -215,10 +216,12 @@ class ClusterAttention(nn.Module):
             '''
         
         weights = self.weight_net(rel_pos) # b x n x k x ic / b x n x m x ic
-        feat_weights = self.feat_net(rel_feat) # b x n x k x 1 / b x n x m x 1
+        feat_weights = self.feat_net(rel_feat) # b x n x k x h / b x n x m x h
         if mask is not None:
             feat_weights = feat_weights * mask
-        weights = weights * feat_weights
+        feat_weights = feat_weights.repeat_interleave(c_) # b x n x k x c / b x n x m x c
+        #weights = weights * feat_weights
+        feat = feat * feat_weights
         
         feat = (weights.transpose(-1,-2) @ feat).view(b,n,-1) # b x n x ic*c 
         feat = self.proj(feat)
@@ -601,7 +604,7 @@ class BasicLayer(nn.Module):
             # perform k-means
             with torch.no_grad():
                 cluster_mean, cluster_mean_pos, mean_assignment, member_idx, cluster_mask= kmeans(cluster_feat, self.k, max_cluster_size=self.max_cluster_size,num_nearest_mean=2, num_iter=10, pos=pos, pos_lambda=self.pos_lambda, valid_mask=mask, init='random',balanced=True, fillup=False, normalize=True) # b x k x m
-                _, _, mean_assignment2, member_idx2, cluster_mask2= kmeans(cluster_mean, k2, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos=cluster_mean_pos, pos_lambda=self.pos_lambda, valid_mask=None, init='random',balanced=True, fillup=False, normalize=True) # b x k2 x m'
+                _, _, mean_assignment2, member_idx2, cluster_mask2= kmeans(cluster_mean, k2, max_cluster_size=None, num_nearest_mean=1, num_iter=10, pos=cluster_mean_pos, pos_lambda=self.pos_lambda, valid_mask=(cluster_mask.sum(-1,keepdim=True)>0).long(), init='random',balanced=True, fillup=False, normalize=True) # b x k2 x m'
             _,k,m = member_idx.shape
             self.k=k
             # merge clusters
