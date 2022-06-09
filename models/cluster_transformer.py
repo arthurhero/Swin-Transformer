@@ -59,18 +59,26 @@ class ClusterAttention(nn.Module):
         self.pos_dim = pos_dim
         self.num_heads = num_heads
 
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        self.softmax = nn.Softmax(dim=-1)
+
         inner_ch=4
         self.weight_net = nn.Sequential(
                     nn.Linear(pos_dim,inner_ch),
                     nn.LayerNorm(inner_ch),
                     nn.GELU()
                 )
+        '''
         self.feat_net = nn.Sequential(
-                    nn.Linear(dim,dim//3),
+                    nn.Linear(dim,dim),
                     nn.GELU(),
                     nn.Linear(dim//3,num_heads),
                     nn.Sigmoid()
                 )
+        '''
 
         self.attn_drop = nn.Dropout(attn_drop)
         if output_dim is None:
@@ -112,6 +120,9 @@ class ClusterAttention(nn.Module):
         pos_orig = pos.clone() # b x n x d
         cluster_feat_orig = cluster_feat.clone() # b x n x c_
 
+        q = self.q(feat) # b x n x c
+        kv = self.kv(feat) # b x n x 2c
+
         '''
         if q_subsample_idx is not None:
             q = q.gather(index=q_subsample_idx.expand(-1,-1,c),dim=1) # b x n' x c
@@ -130,55 +141,49 @@ class ClusterAttention(nn.Module):
         pos = pos / pos.view(-1,d).max(0)[0] # normalize
         '''
         
-        if member_idx is not None:
-            z,m = member_idx.shape
+        z,m = member_idx.shape
 
-            if not attend_means:
-                # collect nearest clusters for each point
-                batch_idx2 = torch.arange(b,device=mean_assignment.device,dtype=mean_assignment.dtype).reshape(-1,1,1).expand(-1,n,nnc) # b x n x nnc
-                member_idx = member_idx.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b,n,nnc*m) # b x n x nnc*m
-                self_idx_rotate = torch.arange(n,device=feat.device).long().repeat(b).unsqueeze(-1)
-                '''
-                if q_subsample_idx is not None:
-                    self_idx_rotate = q_subsample_idx.reshape(b*n,1)
-                '''
-                self_idx = (member_idx.reshape(b*n,-1)==self_idx_rotate).nonzero(as_tuple=True)
-                if cluster_mask is not None:
-                    cluster_mask = cluster_mask.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b*n,nnc*m) # b*n x nnc*m
-                    cluster_mask[self_idx]=0
-                    # sample a subset of neighbors
-                    neighbor_idx = cluster_mask.to(feat.dtype).clamp(min=1e-5).multinomial(cluster_size-1).reshape(b,n,cluster_size-1) # b x n x cluster_size-1
-                    cluster_mask = cluster_mask.reshape(b,n,-1)
-                else:
-                    ones = torch.ones_like(member_idx).reshape(b*n,-1)
-                    ones[self_idx]=1e-5
-                    neighbor_idx = ones.multinomial(cluster_size-1).reshape(b,n,cluster_size-1) # b x n x cluster_size-1
-                member_idx = member_idx.gather(index=neighbor_idx,dim=-1) # b x n x m-1
-                member_idx = torch.cat([member_idx,self_idx_rotate.reshape(b,n,1)],dim=-1) # b x n x cluster_size
-                if cluster_mask is not None:
-                    cluster_mask = cluster_mask.gather(index=neighbor_idx,dim=-1) # b x n x m-1
-                    cluster_mask = torch.cat([cluster_mask,torch.ones(b,n,1,device=cluster_mask.device,dtype=cluster_mask.dtype)],dim=-1) # b x n x cluster_size
-                batch_idx = torch.arange(b,device=mean_assignment.device,dtype=mean_assignment.dtype).reshape(-1,1,1).expand(-1,n,cluster_size) # b x n x m
-                m = cluster_size
-                z = b*n
-
-            member_idx = member_idx.reshape(-1) # z*m
-            batch_idx = batch_idx.reshape(-1) # z*m
-            feat = feat[batch_idx,member_idx].clone().reshape(z,m,-1)
-            pos = pos[batch_idx,member_idx].clone().reshape(z,m,d)
-            if not attend_means:
-                cluster_feat = cluster_feat[batch_idx,member_idx].clone().reshape(z,m,c_)
+        if not attend_means:
+            # collect nearest clusters for each point
+            batch_idx2 = torch.arange(b,device=mean_assignment.device,dtype=mean_assignment.dtype).reshape(-1,1,1).expand(-1,n,nnc) # b x n x nnc
+            member_idx = member_idx.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b,n,nnc*m) # b x n x nnc*m
+            self_idx_rotate = torch.arange(n,device=feat.device).long().repeat(b).unsqueeze(-1)
+            '''
+            if q_subsample_idx is not None:
+                self_idx_rotate = q_subsample_idx.reshape(b*n,1)
+            '''
+            self_idx = (member_idx.reshape(b*n,-1)==self_idx_rotate).nonzero(as_tuple=True)
             if cluster_mask is not None:
-                mask = cluster_mask.reshape(z,m,1)
-            elif mask is not None:
-                mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
-                if mask.min()==1:
-                    mask = None
-        else:
-            z,m=b,n
-            if not attend_means:
-                z = b*n
-                m = cluster_size
+                cluster_mask = cluster_mask.reshape(b,k,m)[batch_idx2.reshape(-1),mean_assignment.reshape(-1)].reshape(b*n,nnc*m) # b*n x nnc*m
+                cluster_mask[self_idx]=0
+                # sample a subset of neighbors
+                neighbor_idx = cluster_mask.to(feat.dtype).clamp(min=1e-5).multinomial(cluster_size-1).reshape(b,n,cluster_size-1) # b x n x cluster_size-1
+                cluster_mask = cluster_mask.reshape(b,n,-1)
+            else:
+                ones = torch.ones_like(member_idx).reshape(b*n,-1)
+                ones[self_idx]=1e-5
+                neighbor_idx = ones.multinomial(cluster_size-1).reshape(b,n,cluster_size-1) # b x n x cluster_size-1
+            member_idx = member_idx.gather(index=neighbor_idx,dim=-1) # b x n x m-1
+            member_idx = torch.cat([member_idx,self_idx_rotate.reshape(b,n,1)],dim=-1) # b x n x cluster_size
+            if cluster_mask is not None:
+                cluster_mask = cluster_mask.gather(index=neighbor_idx,dim=-1) # b x n x m-1
+                cluster_mask = torch.cat([cluster_mask,torch.ones(b,n,1,device=cluster_mask.device,dtype=cluster_mask.dtype)],dim=-1) # b x n x cluster_size
+            batch_idx = torch.arange(b,device=mean_assignment.device,dtype=mean_assignment.dtype).reshape(-1,1,1).expand(-1,n,cluster_size) # b x n x m
+            m = cluster_size
+            z = b*n
+
+        member_idx = member_idx.reshape(-1) # z*m
+        batch_idx = batch_idx.reshape(-1) # z*m
+        kv = kv[batch_idx,member_idx].clone().reshape(z,m,-1)
+        pos = pos[batch_idx,member_idx].clone().reshape(z,m,d)
+        if not attend_means:
+            cluster_feat = cluster_feat[batch_idx,member_idx].clone().reshape(z,m,c_)
+        if cluster_mask is not None:
+            mask = cluster_mask.reshape(z,m,1)
+        elif mask is not None:
+            mask = mask[batch_idx,member_idx].clone().reshape(z,m,1)
+            if mask.min()==1:
+                mask = None
 
         if attend_means:
             if cluster_score is None:
@@ -192,38 +197,46 @@ class ClusterAttention(nn.Module):
                 cluster_score = cluster_score.unsqueeze(-1)
                 if mask is not None:
                     cluster_score = cluster_score * mask
-            feat = (feat * cluster_score).sum(1).reshape(b,k,c) # b x k x c
-            feat = feat.unsqueeze(1).expand(-1,n,-1,-1) # b x n x k x c
+            kv = (kv * cluster_score).sum(1).reshape(b,k,2*c) # b x k x 2c
             pos = (pos * cluster_score).sum(1).reshape(b,k,d) # b x k x d
             if mask is not None:
-                mask = (mask.sum(1)>0).long().reshape(b,1,k,1) # b x 1 x k x 1
+                mask = (mask.sum(1)>0).long().reshape(b,1,1,k)
                 if mask.min()==1:
                     mask = None
 
+        q = q * self.scale
+        q = q.view(b,n,h,c_).permute(0,2,1,3) # b x h x n x c_
         if attend_means:
             rel_pos = pos[:,None,:,:] - pos_orig[:,:,None,:] # b x n x k x d
-            rel_feat = feat - feat_orig[:,:,None,:] # b x n x k x c
+            kv = kv.view(b,k,h,2,c_).permute(3,0,2,1,4) # 2 x b x h x k x c_
+            key, v = kv[0],kv[1]
+            attn = q @ key.transpose(-1,-2) # b x h x n x k
         else:
-            feat = feat.reshape(b,n,m,-1)
             rel_pos = pos_orig.unsqueeze(2) - pos.reshape(b,n,m,d) # b x n x m x d
-            rel_feat = feat_orig.unsqueeze(2) - feat # b x n x m x c
+            kv = kv.view(b,n,m,h,2,c_).permute(4,0,3,1,2,5) # 2 x b x h x n x m x c_
+            key, v = kv[0],kv[1]
+            attn = (q.unsqueeze(3) * key).sum(-1) # b x h x n x m
+
             if mask is not None:
-                mask = mask.reshape(b,n,m,1)
+                mask = mask.reshape(b,1,n,m)
             '''
             rel_cluster_feat = cluster_feat_orig.unsqueeze(2) - cluster_feat.reshape(b,n,m,-1) # b x n x m x c_
             cluster_dist = (rel_cluster_feat**2).sum(-1) # b x n x m
             cluster_dist = cluster_dist.unsqueeze(1)
             '''
         
-        weights = self.weight_net(rel_pos) # b x n x k x ic / b x n x m x ic
-        feat_weights = self.feat_net(rel_feat) # b x n x k x h / b x n x m x h
+        weights = self.weight_net(rel_pos).unsqueeze(1) # b x 1 x n x k x ic / b x 1 x n x m x ic
         if mask is not None:
-            feat_weights = feat_weights * mask
-        feat_weights = feat_weights.repeat_interleave(c_,dim=-1) # b x n x k x c / b x n x m x c
-        #weights = weights * feat_weights
-        feat = feat * feat_weights
+            mask = (1-mask)*(-100)
+            attn = attn + mask
+        attn = self.softmax(attn)
+        attn = self.attn_drop(attn)
+        weights = weights * attn.unsqueeze(-1) # b x h x n x k x ic
+        if attend_means:
+            feat = (weights.transpose(-1,-2) @ v.unsqueeze(2)).permute(0,2,1,3,4).reshape(b,n,-1)
+        else:
+            feat = (weights.transpose(-1,-2) @ v).permute(0,2,1,3,4).reshape(b,n,-1)
         
-        feat = (weights.transpose(-1,-2) @ feat).view(b,n,-1) # b x n x ic*c 
         feat = self.proj(feat)
 
         feat = self.proj_drop(feat)
